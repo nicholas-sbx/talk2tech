@@ -11,7 +11,7 @@ import uuid
 
 from fastapi import WebSocket, WebSocketDisconnect
 
-from backend.sentences import pop_sentences
+from backend.sentences import clean_for_speech, pop_sentences
 from integrations.voices import voice_id_for
 
 log = logging.getLogger(__name__)
@@ -105,26 +105,30 @@ class Session:
         speaker = asyncio.create_task(self._speak_in_order(speech))
         pending_tts: list[asyncio.Task] = []
 
-        def say(sentence: str) -> None:
+        reply: list[str] = []
+
+        def say(sentence: str, record: bool = True) -> None:
+            sentence = clean_for_speech(sentence)
+            if not sentence:
+                return
+            if record:
+                reply.append(sentence)
             task = asyncio.create_task(self.voice.synthesize(sentence, self.voice_id))
             pending_tts.append(task)
             speech.put_nowait((sentence, task))
 
         try:
             if self.persona is None:
-                await self._birth(image, say)
+                await self._birth(image, lambda s: say(s, record=False))
 
             await self.status("thinking")
-            reply, buffer = [], ""
+            buffer = ""
             async for delta in self.llm.reply_stream(self.persona, self.history, user_text, image):
                 buffer += delta
                 sentences, buffer = pop_sentences(buffer)
                 for s in sentences:
-                    reply.append(s)
                     say(s)
-            if buffer.strip():
-                reply.append(buffer.strip())
-                say(buffer.strip())
+            say(buffer)
 
             speech.put_nowait(None)
             await speaker
@@ -155,7 +159,7 @@ class Session:
         sentences, rest = pop_sentences(greeting + " ")
         for s in sentences + ([rest.strip()] if rest.strip() else []):
             say(s)
-        self.history.append({"role": "model", "text": greeting})
+        self.history.append({"role": "model", "text": clean_for_speech(greeting)})
 
     async def _speak_in_order(self, speech: asyncio.Queue) -> None:
         """Send sentences to the device in order, as soon as each one's audio is ready."""
