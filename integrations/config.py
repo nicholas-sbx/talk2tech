@@ -27,16 +27,6 @@ ELEVENLABS_STT_MODEL = _env("ELEVENLABS_STT_MODEL", "scribe_v1")
 ELEVENLABS_TTS_MODEL = _env("ELEVENLABS_TTS_MODEL", "eleven_flash_v2_5")
 ELEVENLABS_DEFAULT_VOICE_ID = _env("ELEVENLABS_DEFAULT_VOICE_ID", "21m00Tcm4TlvDq8ikWAM")
 
-SNOWFLAKE = {
-    "account": _env("SNOWFLAKE_ACCOUNT"),
-    "user": _env("SNOWFLAKE_USER"),
-    "password": _env("SNOWFLAKE_PASSWORD"),
-    "role": _env("SNOWFLAKE_ROLE"),
-    "warehouse": _env("SNOWFLAKE_WAREHOUSE"),
-    "database": _env("SNOWFLAKE_DATABASE"),
-    "schema": _env("SNOWFLAKE_SCHEMA"),
-}
-
 LOCAL_EVENTS_PATH = ROOT / "data" / "events.jsonl"
 
 
@@ -47,7 +37,3 @@ def use_gemini() -> bool:
 def use_elevenlabs() -> bool:
     return bool(ELEVENLABS_API_KEY) and not FORCE_MOCK
 
-
-def use_snowflake() -> bool:
-    required = ("account", "user", "password", "warehouse", "database", "schema")
-    return all(SNOWFLAKE[k] for k in required) and not FORCE_MOCK

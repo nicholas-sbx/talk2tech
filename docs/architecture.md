@@ -9,7 +9,7 @@
  │          talk clip    │              │  3. stream reply           │──▶ Gemini (stream, in character)
  │ speaker ◀ MP3 per    │◀──────────────│  4. sentence → TTS, in     │──▶ ElevenLabs TTS (per sentence)
  │          sentence     │  say msgs    │     order, pipelined       │
- └──────────────────────┘              │  5. log in background ─────┼──▶ Snowflake / data/events.jsonl
+ └──────────────────────┘              │  5. log in background ─────┼──▶ data/events.jsonl
                                         └────────────────────────────┘
                                                                          dashboard/ (Streamlit) reads the log
 ```
@@ -39,5 +39,5 @@ In mock voice mode the device speaks replies with the browser's built-in speech 
 1. ✅ Frame + push-to-talk → Gemini → spoken reply
 2. ✅ Personas with preset voices
 3. Unique voice per object via ElevenLabs voice design
-4. Snowflake memory that recognizes an object again (image embeddings) and recalls past chats
-5. Cortex Search for real facts about objects; dashboard polish
+4. Memory that recognizes an object again (image embeddings) and recalls past chats
+5. Dashboard polish

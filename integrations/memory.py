@@ -1,6 +1,6 @@
 """Event log for objects and conversation turns. Writes happen off the voice loop, in the background.
 
-Snowflake when configured, otherwise a local JSONL file. The dashboard reads either one.
+Events go to a local JSONL file that the dashboard reads.
 """
 
 import asyncio
@@ -11,16 +11,6 @@ from datetime import datetime, timezone
 from integrations import config
 
 log = logging.getLogger(__name__)
-
-CREATE_TABLE = """
-CREATE TABLE IF NOT EXISTS EVENTS (
-    TS TIMESTAMP_NTZ,
-    SESSION_ID STRING,
-    KIND STRING,
-    OBJECT_NAME STRING,
-    PAYLOAD VARIANT
-)"""
-
 
 class _BackgroundLogger:
     """Fire-and-forget logging that never blocks or breaks a conversation."""
@@ -61,32 +51,5 @@ class LocalMemory(_BackgroundLogger):
             f.write(json.dumps(event) + "\n")
 
 
-class SnowflakeMemory(_BackgroundLogger):
-    name = "snowflake"
-
-    def __init__(self) -> None:
-        super().__init__()
-        self._conn = None
-
-    def _connection(self):
-        if self._conn is None:
-            import snowflake.connector
-
-            params = {k: v for k, v in config.SNOWFLAKE.items() if v}
-            self._conn = snowflake.connector.connect(**params)
-            self._conn.cursor().execute(CREATE_TABLE)
-        return self._conn
-
-    def _write(self, event: dict) -> None:
-        self._connection().cursor().execute(
-            "INSERT INTO EVENTS (TS, SESSION_ID, KIND, OBJECT_NAME, PAYLOAD) "
-            "SELECT %s, %s, %s, %s, PARSE_JSON(%s)",
-            (event["ts"], event["session_id"], event["kind"], event["object_name"], json.dumps(event["payload"])),
-        )
-
-
 def make_memory():
-    if config.use_snowflake():
-        return SnowflakeMemory()
-    log.warning("Snowflake not configured: logging events to %s", config.LOCAL_EVENTS_PATH)
     return LocalMemory()

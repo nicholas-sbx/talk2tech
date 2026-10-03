@@ -18,16 +18,6 @@ st.set_page_config(page_title="talk2tech dashboard", page_icon="🗣️", layout
 
 @st.cache_data(ttl=10)
 def load_events() -> tuple[pd.DataFrame, str]:
-    if config.use_snowflake():
-        import snowflake.connector
-
-        params = {k: v for k, v in config.SNOWFLAKE.items() if v}
-        with snowflake.connector.connect(**params) as conn:
-            df = pd.read_sql("SELECT TS, SESSION_ID, KIND, OBJECT_NAME, PAYLOAD FROM EVENTS", conn)
-        df.columns = [c.lower() for c in df.columns]
-        df["payload"] = df["payload"].apply(lambda p: json.loads(p) if isinstance(p, str) else p)
-        return df, "Snowflake"
-
     path = config.LOCAL_EVENTS_PATH
     if not path.exists():
         return pd.DataFrame(columns=["ts", "session_id", "kind", "object_name", "payload"]), str(path)
