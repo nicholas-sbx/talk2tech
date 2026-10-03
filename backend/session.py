@@ -7,6 +7,7 @@ import asyncio
 import base64
 import contextlib
 import logging
+import time
 import uuid
 
 from fastapi import WebSocket, WebSocketDisconnect
@@ -30,6 +31,9 @@ class Session:
         self.voice_id: str | None = None
         self.history: list[dict] = []
         self._turn: asyncio.Task | None = None
+        # Persona generation started early, from the frame sent when the talk button is pressed.
+        self._waking: asyncio.Task | None = None
+        self._turn_start = 0.0
         self._send_lock = asyncio.Lock()
 
     async def send(self, msg: dict) -> None:
@@ -53,7 +57,9 @@ class Session:
             while True:
                 msg = await self.ws.receive_json()
                 kind = msg.get("type")
-                if kind == "audio":
+                if kind == "frame":
+                    self._start_waking(_decode(msg.get("image")))
+                elif kind == "audio":
                     self._start_turn(self._audio_turn(msg))
                 elif kind == "text":
                     self._start_turn(self._respond(msg.get("text", "").strip(), _decode(msg.get("image"))))
@@ -61,16 +67,29 @@ class Session:
                     self._cancel_turn()
                 elif kind == "reset":
                     self._cancel_turn()
+                    self._cancel_waking()
                     self.persona, self.voice_id, self.history = None, None, []
                     await self.send({"type": "reset"})
         except WebSocketDisconnect:
             pass
         finally:
             self._cancel_turn()
+            self._cancel_waking()
+
+    def _start_waking(self, image: bytes | None) -> None:
+        """Begin generating the persona while the user is still talking."""
+        if self.persona is None and self._waking is None:
+            self._waking = asyncio.create_task(self.llm.make_persona(image))
+
+    def _cancel_waking(self) -> None:
+        if self._waking:
+            self._waking.cancel()
+            self._waking = None
 
     def _start_turn(self, coro) -> None:
         # A new turn interrupts whatever the object was saying.
         self._cancel_turn()
+        self._turn_start = time.perf_counter()
         self._turn = asyncio.create_task(self._guarded(coro))
 
     def _cancel_turn(self) -> None:
@@ -90,6 +109,7 @@ class Session:
     async def _audio_turn(self, msg: dict) -> None:
         await self.status("transcribing")
         text = await self.voice.transcribe(_decode(msg.get("data")) or b"", msg.get("mime", ""))
+        log.info("[timing] speech-to-text %.2fs", time.perf_counter() - self._turn_start)
         if not text:
             await self.send({"type": "error", "message": "Didn't catch that. Try again?"})
             await self.status("idle")
@@ -150,7 +170,17 @@ class Session:
     async def _birth(self, image: bytes | None, say) -> None:
         """First sight of an object: identify it and give it a personality and voice."""
         await self.status("waking")
-        self.persona = await self.llm.make_persona(image)
+        self._start_waking(image)  # no-op if the button press already started it
+        try:
+            # Shielded so an interrupted turn doesn't throw away a persona that's nearly ready.
+            persona = await asyncio.shield(self._waking)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            self._waking = None  # let the next turn try again
+            raise
+        self.persona, self._waking = persona, None
+        log.info("[timing] persona ready %.2fs after release", time.perf_counter() - self._turn_start)
         self.voice_id = voice_id_for(self.persona.get("voice"))
         await self.send({"type": "persona", "persona": self.persona})
         self.memory.log(self.id, "object", self.persona["name"], self.persona)
@@ -168,6 +198,7 @@ class Session:
             sentence, tts = item
             audio = await tts
             if first:
+                log.info("[timing] first audio %.2fs after release", time.perf_counter() - self._turn_start)
                 await self.status("speaking")
                 first = False
             await self.send(

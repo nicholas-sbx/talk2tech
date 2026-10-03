@@ -153,6 +153,8 @@ function startRecording(ev) {
   stopSpeech();
   send({ type: "interrupt" });
   pressFrame = grabFrame(); // the frame from the moment you start talking
+  // Lets a new object start waking up while you're still talking.
+  if (pressFrame) send({ type: "frame", image: pressFrame });
 
   const mime = pickMime();
   const chunks = [];
@@ -204,6 +206,16 @@ textForm.addEventListener("submit", (e) => {
   send({ type: "text", text, image: grabFrame() });
   textInput.value = "";
   textInput.blur();
+});
+
+// ---------- show text toggle (off by default, remembered per phone) ----------
+
+const showText = $("#show-text");
+try { showText.checked = localStorage.getItem("showText") === "1"; } catch {}
+document.body.classList.toggle("show-text", showText.checked);
+showText.addEventListener("change", () => {
+  document.body.classList.toggle("show-text", showText.checked);
+  try { localStorage.setItem("showText", showText.checked ? "1" : "0"); } catch {}
 });
 
 $("#reset").addEventListener("click", () => {
