@@ -2,8 +2,17 @@
 
 import re
 
-# Sentence end: terminal punctuation, optional closing quotes/brackets, then whitespace.
-_BOUNDARY = re.compile(r"[.!?…]+[\"')\]]*\s+")
+# Sentence end: terminal punctuation, optional closing quotes/brackets/asterisks, then whitespace.
+_BOUNDARY = re.compile(r"[.!?…]+[\"')\]*]*\s+")
+# Stage directions like *sighs* or [laughs], and leftover markdown symbols.
+_STAGE_DIRECTION = re.compile(r"\*[^*]*\*|\[[^\]]*\]")
+_MARKDOWN = re.compile(r"[*_#`~]+")
+
+
+def clean_for_speech(text: str) -> str:
+    """Remove things the model shouldn't say out loud."""
+    text = _MARKDOWN.sub("", _STAGE_DIRECTION.sub("", text))
+    return re.sub(r"\s{2,}", " ", text).strip()
 
 
 def pop_sentences(buffer: str) -> tuple[list[str], str]:
