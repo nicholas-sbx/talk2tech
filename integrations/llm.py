@@ -43,7 +43,7 @@ class GeminiLLM:
         from google import genai
 
         self._client = genai.Client(api_key=config.GEMINI_API_KEY)
-        self._model = config.GEMINI_MODEL
+        self._models = [m for m in (config.GEMINI_MODEL, config.GEMINI_FALLBACK_MODEL) if m]
 
     def _config(self, **kwargs):
         from google.genai import types
@@ -53,6 +53,18 @@ class GeminiLLM:
             kwargs["thinking_config"] = types.ThinkingConfig(thinking_level=config.GEMINI_THINKING_LEVEL)
         return types.GenerateContentConfig(**kwargs)
 
+    async def _with_fallback(self, call, **kwargs):
+        """Try each model in turn when one is overloaded or rate limited (503/429)."""
+        from google.genai import errors
+
+        for i, model in enumerate(self._models):
+            try:
+                return await call(model=model, **kwargs)
+            except errors.APIError as e:
+                if e.code not in (429, 503) or i == len(self._models) - 1:
+                    raise
+                log.warning("Gemini %s unavailable (%s), falling back to %s", model, e.code, self._models[i + 1])
+
     @staticmethod
     def _image_part(image: bytes):
         from google.genai import types
@@ -61,8 +73,8 @@ class GeminiLLM:
 
     async def make_persona(self, image: bytes | None) -> dict:
         contents = [self._image_part(image), BIRTH_PROMPT] if image else [BIRTH_PROMPT]
-        resp = await self._client.aio.models.generate_content(
-            model=self._model,
+        resp = await self._with_fallback(
+            self._client.aio.models.generate_content,
             contents=contents,
             config=self._config(response_mime_type="application/json", temperature=1.0),
         )
@@ -84,8 +96,8 @@ class GeminiLLM:
         parts.append(types.Part.from_text(text=user_text))
         contents.append(types.Content(role="user", parts=parts))
 
-        stream = await self._client.aio.models.generate_content_stream(
-            model=self._model,
+        stream = await self._with_fallback(
+            self._client.aio.models.generate_content_stream,
             contents=contents,
             config=self._config(
                 system_instruction=persona_system_prompt(persona),

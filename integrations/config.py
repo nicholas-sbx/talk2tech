@@ -18,6 +18,7 @@ FORCE_MOCK = _env("FORCE_MOCK") == "1"
 
 GEMINI_API_KEY = _env("GEMINI_API_KEY")
 GEMINI_MODEL = _env("GEMINI_MODEL", "gemini-3.5-flash-lite")
+GEMINI_FALLBACK_MODEL = _env("GEMINI_FALLBACK_MODEL", "gemini-3.5-flash")
 # Less thinking = faster replies. gemini-3.5-flash-lite supports minimal/low/medium/high.
 GEMINI_THINKING_LEVEL = _env("GEMINI_THINKING_LEVEL", "minimal")
 
