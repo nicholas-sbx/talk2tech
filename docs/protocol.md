@@ -7,6 +7,7 @@ Binary payloads (images, audio) are base64 strings. Agree on changes here before
 
 | type | fields | meaning |
 |---|---|---|
+| `frame` | `image` (b64 JPEG) | Sent when the talk button is pressed. If no object is awake yet, the backend starts creating its persona right away, while the user is still talking. |
 | `audio` | `mime`, `data` (b64 audio clip), `image` (b64 JPEG or null) | Push-to-talk clip just ended. `image` is the camera frame from when the button was pressed. |
 | `text` | `text`, `image` | Typed message, same as `audio` but skips speech-to-text. |
 | `interrupt` | | User started talking; stop the current reply. |
