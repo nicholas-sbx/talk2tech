@@ -3,7 +3,7 @@
 Point your phone at any object and talk to it. It wakes up with its own personality and voice and
 talks back, in character, about what it sees.
 
-**Stack:** mobile web client · FastAPI · Gemini (vision) · ElevenLabs (speech) · Snowflake (memory + analytics)
+**Stack:** mobile web client · FastAPI · Gemini (vision) · ElevenLabs (speech) · local JSONL (analytics)
 
 ## Repo layout
 
@@ -11,7 +11,7 @@ talks back, in character, about what it sees.
 |---|---|
 | `device/` | Mobile web client: camera, push-to-talk, playback. Plain HTML/JS, served by the backend. |
 | `backend/` | FastAPI orchestrator: WebSocket endpoint and the turn loop. |
-| `integrations/` | Thin wrappers for Gemini, ElevenLabs and Snowflake, each with a mock. |
+| `integrations/` | Thin wrappers for Gemini and ElevenLabs, each with a mock. |
 | `dashboard/` | Streamlit analytics over the conversation log. |
 | `docs/` | [Architecture](docs/architecture.md) and the [device ↔ backend protocol](docs/protocol.md). |
 
@@ -53,7 +53,7 @@ pip install -r dashboard/requirements.txt
 streamlit run dashboard/app.py
 ```
 
-Reads Snowflake if configured, otherwise `data/events.jsonl`.
+Reads `data/events.jsonl`.
 
 ## Team habits
 
