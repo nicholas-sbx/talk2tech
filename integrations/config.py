@@ -17,7 +17,9 @@ def _env(name: str, default: str = "") -> str:
 FORCE_MOCK = _env("FORCE_MOCK") == "1"
 
 GEMINI_API_KEY = _env("GEMINI_API_KEY")
-GEMINI_MODEL = _env("GEMINI_MODEL", "gemini-2.5-flash")
+GEMINI_MODEL = _env("GEMINI_MODEL", "gemini-3.8-flash")
+# Less thinking = faster replies. gemini-3.8-flash supports low/medium/high.
+GEMINI_THINKING_LEVEL = _env("GEMINI_THINKING_LEVEL", "low")
 
 ELEVENLABS_API_KEY = _env("ELEVENLABS_API_KEY")
 ELEVENLABS_STT_MODEL = _env("ELEVENLABS_STT_MODEL", "scribe_v1")

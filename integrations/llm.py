@@ -48,9 +48,9 @@ class GeminiLLM:
     def _config(self, **kwargs):
         from google.genai import types
 
-        # Thinking adds latency we can't afford in a voice loop. 2.5-series models accept a zero budget.
-        if "2.5" in self._model:
-            kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=0)
+        # Thinking adds latency we can't afford in a voice loop, so keep it at the lowest useful level.
+        if config.GEMINI_THINKING_LEVEL:
+            kwargs["thinking_config"] = types.ThinkingConfig(thinking_level=config.GEMINI_THINKING_LEVEL)
         return types.GenerateContentConfig(**kwargs)
 
     @staticmethod
@@ -89,7 +89,7 @@ class GeminiLLM:
             contents=contents,
             config=self._config(
                 system_instruction=persona_system_prompt(persona),
-                max_output_tokens=300,
+                max_output_tokens=1024,  # includes thinking tokens; the prompt keeps replies short
                 temperature=0.9,
             ),
         )
