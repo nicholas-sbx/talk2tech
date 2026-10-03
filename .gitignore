@@ -17,3 +17,7 @@ data/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Cloudflare tunnel secrets
+cloudflared/credentials.json
+cloudflared/*.pem

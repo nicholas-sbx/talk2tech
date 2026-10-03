@@ -12,7 +12,7 @@ VOICES = {
     "bold_woman": ("AZnzlk1XvdvUeBnXmlld", "strong, confident, slightly sassy woman"),
     "soft_woman": ("EXAVITQu4vr4xnSDxMaL", "soft, gentle, friendly woman"),
     "deep_man": ("pNInz6obpgDQGcFmaJgB", "deep, steady middle-aged man"),
-    "young_man": ("TxGEqnHWrfWFTt5ENxpK", "young, energetic man"),
+    "young_man": ("TX3LPaxmHKxFdv7VOQHJ", "young, energetic man"),
     "friendly_man": ("ErXwobaYiN019PkySvjV", "well-rounded, friendly man"),
     "gruff_man": ("VR6AewLTigWG4xSOukaG", "gruff, crisp, older man"),
 }
