@@ -1,0 +1,137 @@
+:root {
+  --bg: #0b0b0f;
+  --fg: #f5f5f7;
+  --muted: rgba(245, 245, 247, 0.65);
+  --glass: rgba(15, 15, 20, 0.55);
+  --accent: #7c5cff;
+  --hot: #ff4d6d;
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--fg);
+  font: 16px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  overflow: hidden;
+  overscroll-behavior: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+#cam {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  background: #000;
+}
+
+button { font: inherit; color: inherit; cursor: pointer; }
+
+.top {
+  position: fixed;
+  top: 0; left: 0; right: 0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: calc(var(--safe-top) + 12px) 16px 24px;
+  background: linear-gradient(to bottom, rgba(0,0,0,0.7), transparent);
+}
+.who { flex: 1; min-width: 0; }
+.name { font-size: 22px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.object { font-size: 14px; color: var(--muted); }
+
+.icon-btn {
+  width: 48px; height: 48px;
+  flex: none;
+  border: 0;
+  border-radius: 50%;
+  background: var(--glass);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  font-size: 22px;
+}
+.spacer { visibility: hidden; }
+
+.captions {
+  max-height: 45vh;
+  margin-bottom: 16px;
+  text-align: left;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  gap: 8px;
+  overflow: hidden;
+  pointer-events: none;
+}
+.bubble {
+  max-width: 85%;
+  padding: 10px 14px;
+  border-radius: 18px;
+  background: var(--glass);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  animation: pop 0.2s ease-out;
+}
+.bubble.user { align-self: flex-end; background: rgba(124, 92, 255, 0.75); font-size: 15px; }
+.bubble.thing { align-self: flex-start; font-size: 18px; }
+.bubble.error { align-self: center; background: rgba(255, 77, 109, 0.8); font-size: 14px; }
+@keyframes pop { from { transform: translateY(6px); opacity: 0; } }
+
+.bottom {
+  position: fixed;
+  left: 0; right: 0; bottom: 0;
+  padding: 32px 16px calc(var(--safe-bottom) + 16px);
+  background: linear-gradient(to top, rgba(0,0,0,0.75), transparent);
+  text-align: center;
+}
+.status { font-size: 14px; color: var(--muted); min-height: 20px; margin-bottom: 12px; }
+.controls { display: flex; align-items: center; justify-content: space-between; max-width: 360px; margin: 0 auto; }
+
+.talk {
+  width: 88px; height: 88px;
+  border-radius: 50%;
+  border: 4px solid rgba(255,255,255,0.9);
+  background: var(--accent);
+  display: grid;
+  place-items: center;
+  touch-action: none;
+  transition: transform 0.1s, background 0.15s;
+}
+.talk:disabled { opacity: 0.4; }
+.talk.recording { background: var(--hot); transform: scale(1.12); }
+.talk-dot { width: 24px; height: 24px; border-radius: 50%; background: #fff; }
+.talk.recording .talk-dot { animation: pulse 1s infinite; }
+@keyframes pulse { 50% { transform: scale(0.6); } }
+
+.text-form { display: flex; gap: 8px; max-width: 480px; margin: 14px auto 0; }
+.text-form[hidden] { display: none; }
+.text-form input {
+  flex: 1; min-width: 0;
+  padding: 12px 14px;
+  border: 0; border-radius: 24px;
+  font: inherit; font-size: 16px; /* 16px stops iOS zooming on focus */
+  background: rgba(255,255,255,0.92); color: #111;
+}
+.text-form button { border: 0; border-radius: 24px; padding: 0 18px; background: var(--accent); }
+
+.mode { margin-top: 10px; font-size: 11px; color: var(--muted); }
+
+.start {
+  position: fixed; inset: 0;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 8px; padding: 24px;
+  background: radial-gradient(circle at 50% 30%, #2a1f5c, var(--bg) 70%);
+  text-align: center;
+}
+.start[hidden] { display: none; }
+.start h1 { font-size: 40px; margin: 0; }
+.start p { color: var(--muted); margin: 0 0 16px; max-width: 280px; }
+.start button { border: 0; border-radius: 28px; padding: 16px 48px; font-size: 18px; font-weight: 600; background: var(--accent); }
+.start-error { color: var(--hot) !important; font-size: 14px; }

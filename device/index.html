@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+  <meta name="theme-color" content="#0b0b0f">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <title>talk2tech</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <video id="cam" autoplay playsinline muted></video>
+
+  <header class="top">
+    <div class="who">
+      <div id="name" class="name">Point at something</div>
+      <div id="object" class="object">Hold the button and say hi</div>
+    </div>
+    <button id="reset" class="icon-btn" aria-label="Talk to a new object" title="New object">↺</button>
+  </header>
+
+  <footer class="bottom">
+    <section id="captions" class="captions" aria-live="polite"></section>
+    <div id="status" class="status">Connecting…</div>
+    <div class="controls">
+      <button id="keyboard" class="icon-btn" aria-label="Type instead" title="Type instead">⌨</button>
+      <button id="talk" class="talk" aria-label="Hold to talk" disabled>
+        <span class="talk-dot"></span>
+      </button>
+      <span class="icon-btn spacer" aria-hidden="true"></span>
+    </div>
+    <form id="text-form" class="text-form" hidden>
+      <input id="text-input" type="text" placeholder="Say something…" autocomplete="off" enterkeyhint="send">
+      <button type="submit">Send</button>
+    </form>
+    <div id="mode" class="mode"></div>
+  </footer>
+
+  <div id="start" class="start">
+    <h1>talk2tech</h1>
+    <p>Point your camera at any object and talk to it.</p>
+    <button id="start-btn">Start</button>
+    <p id="start-error" class="start-error"></p>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
