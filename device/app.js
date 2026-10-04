@@ -184,6 +184,9 @@ function handle(msg) {
     case "box":
       showBox(msg.box, msg.frame_id);
       break;
+    case "model":
+      $("#model").textContent = msg.model;
+      break;
     case "say":
       if (!thingLine) thingLine = line("thing", "");
       followCaptions(() => (thingLine.textContent = (thingLine.textContent + " " + msg.text).trim()));
