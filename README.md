@@ -45,7 +45,8 @@ URL on the phone. Install cloudflared with `winget install Cloudflare.cloudflare
 Without HTTPS the page still loads, but only the typed fallback works.
 
 On a phone the camera runs through the [8th Wall engine](https://8thwall.org) (world tracking in plain
-Safari or Chrome, no app or WebXR needed). When an object wakes up, a 3D smiley face is stuck flat
+Safari or Chrome, no app or WebXR needed). At the start it asks you to move the phone around until
+it has mapped the scene in 3D. When an object wakes up, a 3D smiley face is stuck flat
 on its surface (Gemini picks how big) and stays there as you move. Allow motion access when asked; without it the app falls
 back to the plain camera view. The engine is © Niantic Spatial, Inc., used under its
 [XR Engine License Agreement](https://github.com/8thwall/engine/blob/main/LICENSE).

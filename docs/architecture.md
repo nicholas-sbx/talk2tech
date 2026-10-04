@@ -40,6 +40,12 @@ is stuck flat on that surface, its diameter the share of the object's width that
 (`smiley_size`). A few times a second the device re-checks the surface under it and eases onto it,
 which keeps drift down. Desktop browsers keep the plain camera view.
 
+One camera can only place a point in 3D after seeing it from two places, so a phone that hasn't
+moved has few points and the smiley falls back to a guessed depth. Like iOS's AR coaching, a
+full-screen overlay asks for the phone to be moved until at least 12 cells of a 6×6 hit-test grid
+over the view have feature points under them (held for 0.6 s). It blocks taps until then, and offers
+Skip after 10 s for scenes that never map. If tracking is lost later it comes back without blocking.
+
 ## Mock mode
 
 Every integration has a mock with the same interface (`make_llm`, `make_voice`, `make_memory`).
