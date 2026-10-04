@@ -29,6 +29,7 @@ const CAMERA_FAILURES = {
 let THREE = null;
 let XR8 = null;
 let canvas = null;
+let gl = null;
 let running = false;
 let cube, cubeFill;
 
@@ -38,6 +39,10 @@ const snapshots = new Map();
 let frameCounter = 0;
 let captureWaiters = [];
 let reality = null; // this frame's tracking output
+
+// ?debug: what the AR pipeline did, shown on screen since phones have no console.
+const stats = { sent: 0, unreadable: 0, boxes: 0, lastBox: "none yet" };
+let statsShown = 0;
 
 let target = null; // where the cube should be (THREE.Vector3)
 let targetSize = 0.1;
@@ -141,7 +146,12 @@ export function captureFrame() {
 // box: Gemini box_2d [ymin, xmin, ymax, xmax] (0-1000) for the frame captureFrame() named frameId.
 export function placeBox(box, frameId) {
   const snap = snapshots.get(frameId);
-  if (!running || !snap || !box) return;
+  stats.boxes++;
+  if (!running || !box) return;
+  if (!snap) {
+    stats.lastBox = `${frameId}: no saved pose for that frame`;
+    return;
+  }
   const [ymin, xmin, ymax, xmax] = box;
 
   // How far away the object is: tracked points that land inside the box, as seen from the camera
@@ -151,8 +161,13 @@ export function placeBox(box, frameId) {
   const halfH = ((ymax - ymin) / 2) * BOX_CORE;
   const halfW = ((xmax - xmin) / 2) * BOX_CORE;
   const inBox = (p) => Math.abs(p.y - cy) <= halfH && Math.abs(p.x - cx) <= halfW;
-  const depthIn = (points) => median(points.map((p) => project(p, snap)).filter((p) => p && inBox(p)).map((p) => p.depth));
-  const depth = depthIn(snap.points) ?? depthIn(snap.surfaces) ?? FALLBACK_DEPTH;
+  const depthsIn = (points) => points.map((p) => project(p, snap)).filter((p) => p && inBox(p)).map((p) => p.depth);
+  const fromPoints = depthsIn(snap.points);
+  const fromSurfaces = depthsIn(snap.surfaces);
+  const depth = median(fromPoints) ?? median(fromSurfaces) ?? FALLBACK_DEPTH;
+  const source = fromPoints.length
+    ? `${fromPoints.length}/${snap.points.length} points`
+    : fromSurfaces.length ? `${fromSurfaces.length} surface hits` : "no hits, fixed depth";
 
   // Ray from the camera through the centre of the box, out to that depth.
   const ndc = new THREE.Vector3(cx / 500 - 1, 1 - cy / 500, -1).applyMatrix4(snap.projectionInverse);
@@ -169,6 +184,8 @@ export function placeBox(box, frameId) {
 
   // The points are on the object's front surface: sit the cube's centre inside it.
   target = origin.addScaledVector(dir, along + targetSize / 2);
+  const at = target.toArray().map((v) => v.toFixed(2)).join(", ");
+  stats.lastBox = `${frameId}: depth ${depth.toFixed(2)} (${source}), cube ${targetSize.toFixed(2)} at ${at}`;
 }
 
 export function clearCube() {
@@ -197,13 +214,21 @@ function median(values) {
 function captureModule() {
   return {
     name: "talk2tech-capture",
+    onStart: ({ GLctx }) => {
+      gl = GLctx;
+    },
     onUpdate: ({ processCpuResult }) => {
       reality = processCpuResult.reality || null;
+      if (DEBUG) showStats();
     },
     onRender: () => {
       if (!captureWaiters.length || !reality?.intrinsics) return;
       const image = readCanvas();
-      if (!image) return; // iOS sometimes can't read the canvas this frame; try the next one
+      if (!image) {
+        stats.unreadable++; // try again next frame
+        return;
+      }
+      stats.sent++;
       const frameId = `ar${++frameCounter}`;
       snapshots.set(frameId, snapshot(reality));
       while (snapshots.size > SNAPSHOTS_KEPT) snapshots.delete(snapshots.keys().next().value);
@@ -215,16 +240,54 @@ function captureModule() {
 }
 
 // The camera feed as drawn this frame, as a JPEG. Same crop as the screen, which is also the space
-// the tracking's projection and hit tests use.
+// the tracking's projection and hit tests use. Read straight from GL: drawImage() of a WebGL canvas
+// is unreliable on iOS.
 function readCanvas() {
-  const scale = Math.min(1, MAX_FRAME_SIDE / Math.max(canvas.width, canvas.height));
+  const width = gl.drawingBufferWidth;
+  const height = gl.drawingBufferHeight;
+  const pixels = new Uint8Array(width * height * 4);
+  const bound = gl.getParameter(gl.FRAMEBUFFER_BINDING);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, bound);
+  if (pixels[3] === 0) return null; // nothing drawn yet
+
+  // readPixels is bottom-up; images are top-down.
+  const full = document.createElement("canvas");
+  full.width = width;
+  full.height = height;
+  const ctx = full.getContext("2d");
+  const imageData = ctx.createImageData(width, height);
+  const row = width * 4;
+  for (let y = 0; y < height; y++) {
+    imageData.data.set(pixels.subarray((height - 1 - y) * row, (height - y) * row), y * row);
+  }
+  ctx.putImageData(imageData, 0, 0);
+
+  const scale = Math.min(1, MAX_FRAME_SIDE / Math.max(width, height));
   const out = document.createElement("canvas");
-  out.width = Math.round(canvas.width * scale);
-  out.height = Math.round(canvas.height * scale);
-  const ctx = out.getContext("2d");
-  ctx.drawImage(canvas, 0, 0, out.width, out.height);
-  if (ctx.getImageData(0, 0, 1, 1).data[3] === 0) return null;
+  out.width = Math.round(width * scale);
+  out.height = Math.round(height * scale);
+  out.getContext("2d").drawImage(full, 0, 0, out.width, out.height);
   return out.toDataURL("image/jpeg", 0.7).split(",")[1];
+}
+
+function showStats() {
+  const now = performance.now();
+  if (now - statsShown < 500) return;
+  statsShown = now;
+  const el = document.getElementById("ar-debug");
+  if (!el) return;
+  const tracking = reality ? `${reality.trackingStatus} ${reality.trackingReason}` : "no tracking yet";
+  const points = reality?.worldPoints?.length ?? 0;
+  const cubeState = target ? (cube?.visible ? "shown" : "placed") : "not placed";
+  el.textContent = [
+    `tracking: ${tracking}, ${points} points`,
+    `frames sent: ${stats.sent}, unreadable: ${stats.unreadable}, boxes: ${stats.boxes}`,
+    `last box: ${stats.lastBox}`,
+    `cube: ${cubeState}`,
+  ].join("\n");
+  el.hidden = false;
 }
 
 function snapshot({ position, rotation, intrinsics, worldPoints = [] }) {
