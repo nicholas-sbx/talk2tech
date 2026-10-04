@@ -35,9 +35,10 @@ On phones the 8th Wall engine owns the camera (`device/ar.js`): it draws the fee
 device keeps the camera pose and a grid of hit tests (3D points on what's in view), keyed by
 `frame_id`. Gemini returns the object's `box_2d` with the persona and again (via a parallel `locate`
 call) on every later turn. The hits that fall inside the box, as seen from the saved pose, give the
-object's depth (their median) and its surface angle (a plane fitted through them), and a flat,
-pulsing slab is laid on that surface. A few times a second the device re-checks the surface under the
-slab and eases onto it, which keeps drift down. Desktop browsers keep the plain camera view.
+object's depth (their median) and its surface angle (a plane fitted through them), and a 3D smiley
+is stuck flat on that surface, its diameter the share of the object's width that Gemini picked
+(`smiley_size`). A few times a second the device re-checks the surface under it and eases onto it,
+which keeps drift down. Desktop browsers keep the plain camera view.
 
 ## Mock mode
 

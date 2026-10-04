@@ -26,6 +26,9 @@ Reply with JSON only, using exactly these keys:
 {voice_menu()}
 - "greeting": the first thing it says on waking up, one or two short sentences
 - "box_2d": where that object is in the photo, as [ymin, xmin, ymax, xmax] integers normalized to 0-1000
+- "smiley_size": a 3D smiley face sticker will be stuck flat on the object's visible surface. Pick
+  its diameter as a fraction of the object's visible width, between 0.1 and 1.0, so it looks right
+  for that object: big on a ball or a mug, a small sticker on a laptop lid, a car, or a fridge.
 """
 
 
@@ -230,6 +233,7 @@ class MockLLM:
                 "voice": "gruff_man",
                 "greeting": "Ugh. Who woke me up? I was enjoying being empty.",
                 "box_2d": MOCK_BOX,
+                "smiley_size": 0.6,
             }
         )
 
@@ -259,7 +263,15 @@ def _normalize_persona(raw: dict) -> dict:
     }
     persona = {k: str(raw.get(k) or v) if v is not None else raw.get(k) for k, v in defaults.items()}
     persona["box_2d"] = _normalize_box(raw.get("box_2d"))
+    persona["smiley_size"] = _normalize_fraction(raw.get("smiley_size"), default=0.5)
     return persona
+
+
+def _normalize_fraction(raw, default: float) -> float:
+    try:
+        return min(1.0, max(0.1, float(raw)))
+    except (TypeError, ValueError):
+        return default
 
 
 def _normalize_focus(raw, current: str) -> dict:

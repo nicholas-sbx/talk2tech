@@ -1,7 +1,7 @@
 // talk2tech device client: camera + push-to-talk mic -> backend WebSocket -> spoken replies.
 // Message formats: docs/protocol.md
 
-import { arSupported, requestMotionPermission, startAR, captureFrame, placeBox, clearCube, inAR } from "./ar.js";
+import { arSupported, requestMotionPermission, startAR, captureFrame, placeBox, clearMarker, inAR } from "./ar.js";
 
 const $ = (sel) => document.querySelector(sel);
 const video = $("#cam");
@@ -45,6 +45,7 @@ let recorder = null;
 let held = false;
 let recordStart = 0;
 let frameCounter = 0;
+let smileySize; // the current object's smiley diameter, as a share of its width (Gemini's choice)
 const debugFrames = new Map();
 let audioCtx = null;
 let playChain = Promise.resolve();
@@ -173,8 +174,9 @@ function handle(msg) {
     case "persona":
       $("#name").textContent = msg.persona.name;
       $("#object").textContent = msg.persona.object;
-      // A new persona is a new object: replace the marker rather than nudging the old one.
-      clearCube();
+      // A new persona is a new object: replace the smiley rather than nudging the old one.
+      smileySize = msg.persona.smiley_size;
+      clearMarker();
       if (msg.box) showBox(msg.box, msg.frame_id);
       break;
     case "box":
@@ -194,7 +196,7 @@ function handle(msg) {
     case "reset":
       $("#name").textContent = PLACEHOLDER.name;
       $("#object").textContent = PLACEHOLDER.object;
-      clearCube();
+      clearMarker();
       captions.replaceChildren();
       captions.classList.remove("scrolled");
       break;
@@ -253,9 +255,9 @@ function grabVideoFrame() {
   return { image: canvas.toDataURL("image/jpeg", 0.7).split(",")[1], frameId: `cam${++frameCounter}` };
 }
 
-// Where Gemini found the object: pin the AR cube there, and with ?debug draw it on the sent frame.
+// Where Gemini found the object: stick the AR smiley there, and with ?debug draw it on the sent frame.
 function showBox(box, frameId) {
-  placeBox(box, frameId);
+  placeBox(box, frameId, smileySize);
   const image = debugFrames.get(frameId);
   if (!DEBUG || !image) return;
   const img = new Image();
