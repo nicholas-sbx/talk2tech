@@ -25,6 +25,7 @@ const VIDEO = { facingMode: "environment", width: { ideal: 1280 }, height: { ide
 const AUDIO = { echoCancellation: true, noiseSuppression: true };
 const MIC_REOPEN_MS = 400;
 const MAX_CAPTION_LINES = 60;
+const TEXT_HIDE_DELAY_MS = 300;
 
 let ws;
 let camStream = null;
@@ -354,12 +355,17 @@ keyboardBtn.addEventListener("click", () => {
   textInput.focus();
 });
 
+// Hiding waits a moment: iOS doesn't focus a tapped button, so tapping Send blurs the input
+// (relatedTarget null) before the click arrives, and hiding right away would swallow the send.
 textForm.addEventListener("focusout", (e) => {
-  if (!textSticky && !textForm.contains(e.relatedTarget)) textForm.hidden = true;
+  if (textSticky || textForm.contains(e.relatedTarget)) return;
+  setTimeout(() => {
+    if (!textSticky && !textForm.contains(document.activeElement)) textForm.hidden = true;
+  }, TEXT_HIDE_DELAY_MS);
 });
 
-// Keep focus in the input when tapping Send, so the form isn't hidden before the tap lands.
-textForm.querySelector("button").addEventListener("pointerdown", (e) => e.preventDefault());
+// Where the browser allows it, keep focus in the input when pressing Send.
+textForm.querySelector("button").addEventListener("mousedown", (e) => e.preventDefault());
 
 textForm.addEventListener("submit", (e) => {
   e.preventDefault();
