@@ -69,6 +69,7 @@ let running = false;
 let smiley, faceCanvas, faceTexture;
 const face = new ScribbleFace();
 let audio = null;
+let deathListener = null;
 
 // Camera pose, projection and 3D points for each frame we sent, so a box that arrives seconds
 // later still maps onto the world the way it was when the photo was taken.
@@ -272,6 +273,11 @@ export function clearMarker() {
   targetPosition = null;
   if (smiley) smiley.visible = false;
   revive();
+}
+
+// Calls back when the face dies, so whatever it was saying can be cut off.
+export function onDeath(callback) {
+  deathListener = callback;
 }
 
 // Flaps the face's mouth while a reply plays.
@@ -634,6 +640,7 @@ function feelTheEdges(camera) {
   if (EdgeFearSystem.isOffscreen(u, v, OFFSCREEN_MARGIN, behind)) {
     face.isDead = true;
     audio?.triggerDeathSequence();
+    deathListener?.();
     return;
   }
   face.panic = EdgeFearSystem.computePanic(EdgeFearSystem.computeEdgeDistances(u, v).d);
