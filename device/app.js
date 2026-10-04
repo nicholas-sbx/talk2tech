@@ -1,7 +1,8 @@
 // talk2tech device client: camera + push-to-talk mic -> backend WebSocket -> spoken replies.
 // Message formats: docs/protocol.md
 
-import { arSupported, requestMotionPermission, startAR, captureFrame, placeBox, clearMarker, inAR, setSpeaking, onDeath, onScream } from "./ar.js";
+import { arSupported, requestMotionPermission, startAR, captureFrame, placeBox, clearMarker, inAR, setSpeaking, setThinking, faceOnScreen, onDeath, onScream } from "./ar.js";
+import { startMagic, finishMagic, stopMagic } from "./magic.js";
 
 const $ = (sel) => document.querySelector(sel);
 const video = $("#cam");
@@ -56,6 +57,7 @@ let current = null; // the sentence playing now: { pause, resume, stop }
 let screaming = false; // the AR face is screaming: speech waits until it stops
 let calmWaiters = [];
 let thingLine = null;
+let awake = false; // an object is awake: the backend has its persona
 
 // ---------- startup ----------
 
@@ -169,9 +171,15 @@ function handle(msg) {
     case "hello":
       $("#mode").textContent = `${msg.llm} · ${msg.voice} · memory: ${msg.memory}`;
       $("#mode").hidden = !DEBUG;
+      // A new session (e.g. after reconnecting): nothing's awake on the backend, and no reply is coming.
+      awake = false;
+      answered();
       break;
     case "status":
       setStatus(msg.state);
+      if (msg.state === "waking") wakingUp();
+      else if (msg.state === "speaking" || msg.state === "idle") answered();
+      else setWaiting(true);
       break;
     case "transcript":
       thingLine = null;
@@ -184,6 +192,9 @@ function handle(msg) {
       smileySize = msg.persona.smiley_size;
       clearMarker();
       if (msg.box) showBox(msg.box, msg.frame_id);
+      // It's alive: the spell lands on its new face (or where it is, without AR) and pops.
+      awake = true;
+      finishMagic(() => faceOnScreen() ?? boxOnScreen(msg.box));
       break;
     case "box":
       showBox(msg.box, msg.frame_id);
@@ -208,6 +219,8 @@ function handle(msg) {
       clearMarker();
       captions.replaceChildren();
       captions.classList.remove("scrolled");
+      awake = false;
+      answered();
       break;
     case "error":
       line("error", msg.message);
@@ -218,6 +231,37 @@ function handle(msg) {
 function setStatus(state) {
   talkBtn.disabled = !micAllowed;
   statusEl.textContent = micAllowed || state !== "idle" ? STATUS_TEXT[state] || state : "Tap the keyboard to type";
+}
+
+// A question is on its way. Until the answer starts, the talk button spins, and the object either
+// wakes up under a spell (the first time) or its face turns into a thought bubble.
+function asked() {
+  setWaiting(true);
+  if (awake) setThinking(true);
+  else startMagic();
+}
+
+// A new object is waking up, the first one or one you asked to switch to: any old face goes, and
+// the spell plays until the new one's face is pinned on it.
+function wakingUp() {
+  awake = false;
+  clearMarker();
+  setWaiting(true);
+  startMagic();
+}
+
+// The answer has started, or isn't coming.
+function answered() {
+  setWaiting(false);
+  setThinking(false);
+  if (!awake) stopMagic();
+}
+
+// Never while you're talking: a status from the turn you just cut off can still arrive.
+function setWaiting(on) {
+  const waiting = on && !held && !recorder;
+  talkBtn.classList.toggle("waiting", waiting);
+  talkBtn.setAttribute("aria-busy", String(waiting));
 }
 
 function line(kind, text) {
@@ -288,6 +332,21 @@ function showBox(box, frameId) {
     canvas.hidden = false;
   };
   img.src = `data:image/jpeg;base64,${image}`;
+}
+
+// Where the middle of a box is on screen, in CSS pixels. AR frames are the screen itself; the
+// plain camera view crops the video to cover the window.
+function boxOnScreen(box) {
+  if (!box) return null;
+  const [ymin, xmin, ymax, xmax] = box;
+  const fx = (xmin + xmax) / 2000;
+  const fy = (ymin + ymax) / 2000;
+  if (inAR() || !video.videoWidth) return { x: fx * innerWidth, y: fy * innerHeight };
+  const scale = Math.max(innerWidth / video.videoWidth, innerHeight / video.videoHeight);
+  return {
+    x: innerWidth / 2 + (fx - 0.5) * video.videoWidth * scale,
+    y: innerHeight / 2 + (fy - 0.5) * video.videoHeight * scale,
+  };
 }
 
 // ---------- push to talk ----------
@@ -370,6 +429,10 @@ async function startRecording(ev) {
   if (!micAllowed || held || recorder) return;
   held = true;
   talkBtn.setPointerCapture?.(ev.pointerId);
+  // Talking again cuts off the turn in progress: no more waiting for it.
+  setWaiting(false);
+  setThinking(false);
+  stopMagic();
   stopSpeech();
   audioCtx?.resume();
   send({ type: "interrupt" });
@@ -403,6 +466,7 @@ async function startRecording(ev) {
     const tooShort = performance.now() - recordStart < MIN_CLIP_MS;
     recorder = null;
     if (tooShort || !chunks.length) return setStatus("idle");
+    asked();
     const blob = new Blob(chunks, { type: chunks[0].type || mime });
     const [data, frame] = await Promise.all([toBase64(blob), framing]);
     send({ type: "audio", mime: blob.type, data, image: frame.image, frame_id: frame.frameId });
@@ -471,6 +535,7 @@ textForm.addEventListener("submit", async (e) => {
   stopSpeech();
   textInput.value = "";
   if (!textSticky) textInput.blur(); // dismiss the on-screen keyboard
+  asked();
   const frame = await grabFrame();
   send({ type: "text", text, image: frame.image, frame_id: frame.frameId });
 });
@@ -494,6 +559,8 @@ showTextBtn.addEventListener("click", () => {
 onDeath(() => {
   stopSpeech();
   send({ type: "interrupt" });
+  setWaiting(false);
+  if (!held && !recorder) setStatus("idle"); // no reply's coming now
 });
 
 // While the AR face screams, the sentence it's on pauses, then picks up where it left off. The mic

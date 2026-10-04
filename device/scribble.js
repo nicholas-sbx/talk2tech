@@ -1,8 +1,42 @@
 // The talking face's look and sound, taken from the feature/ar branch (Cody Nguyen): a hand-drawn
 // scribble face with 12 FPS line boil and a mouth that opens with the voice's loudness (or flaps
 // at ~6.5 Hz without it), which panics and screams (450 Hz -> 1500 Hz) as it nears the edge of the
-// screen and dies cartoonishly (slide whistle, splat, X_X) if it's lost off it. ar.js draws it
-// onto a texture stuck flat on the object.
+// screen and dies cartoonishly (slide whistle, splat, X_X) if it's lost off it. While the object
+// thinks of a reply, the face turns into a thought bubble. ar.js draws it onto a texture stuck
+// flat on the object.
+
+// The face turning into a thought bubble, and back: one drawing per frame (12 a second), like cel
+// animation. Each sizes the face and/or the bubble [x, y], and poof is how far a puff of smoke
+// between them has spread.
+const TO_BUBBLE = [
+  { face: [1, 1] },
+  { face: [1.12, 0.84] },
+  { face: [0.5, 0.56], poof: 0.25 },
+  { poof: 0.6 },
+  { bubble: [0.6, 0.6], poof: 0.95 },
+  { bubble: [1.12, 1.08] },
+  { bubble: [1, 1] },
+];
+const TO_FACE = [
+  { bubble: [1, 1] },
+  { bubble: [1.1, 0.86] },
+  { bubble: [0.5, 0.55], poof: 0.25 },
+  { poof: 0.6 },
+  { face: [0.6, 0.6], poof: 0.95 },
+  { face: [1.12, 1.08] },
+  { face: [1, 1] },
+];
+// The puffs of smoke: angle, how far each goes, and how big it starts.
+const POOF = [[-1.9, 1, 9], [-0.6, 0.85, 7], [0.5, 1, 8], [1.6, 0.8, 6.5], [2.7, 0.95, 8.5]];
+// The bubble's cloud is puffs round an ellipse: each one's height, and a nudge to where it starts,
+// so it comes out lumpy like a drawn cloud.
+const CLOUD_PUFFS = [[15, 0], [12, 0.05], [17, -0.04], [13, 0.03], [16, -0.06], [12, 0.04], [18, 0], [14, -0.03], [13, 0.05]];
+// The little puffs trailing off it: x, y, radius, boil seed.
+const THOUGHT_TRAIL = [[-30, 48, 8.5, 41], [-45, 65, 5.2, 47]];
+// "..." in the bubble shows a dot every 3 frames, holds, then starts over, this many frames a round.
+const THINK_BEATS = 18;
+// A new face pops in rather than just appearing: its size, one per frame.
+const APPEAR = [0.25, 0.7, 1.15, 1.04];
 
 
 // =========================================================================
@@ -352,9 +386,35 @@ export class ScribbleFace {
     this.mouthLevel = null; // 0-1 from the voice's loudness; null flaps the mouth on its own
     this.isDead = false;
     this.gazeDirection = { x: 0, y: 0 }; // Looking direction
+    this.thinking = false; // shown as a thought bubble instead of a face
+    this.morphStart = -Infinity; // when it last started turning into the bubble, or back
+    this.appearStart = -Infinity; // when it last popped into view
 
     // Pre-cached scribble jitter tables for deterministic 12 FPS boil
     this.boilTables = this.generateBoilTables();
+  }
+
+  /**
+   * Turns the face into a thought bubble, or back, from whichever drawing it's got to.
+   * instant skips the animation.
+   */
+  setThinking(on, now = performance.now(), instant = false) {
+    on = Boolean(on);
+    if (on !== this.thinking) {
+      const last = TO_BUBBLE.length - 1;
+      const done = Math.min(last, Math.floor((now - this.morphStart) / this.boilInterval));
+      this.thinking = on;
+      // Changing its mind part-way runs the other way from the matching drawing.
+      this.morphStart = now - (last - done) * this.boilInterval;
+    }
+    if (instant) this.morphStart = -Infinity;
+  }
+
+  /**
+   * Pops the face into view, a size too big before it settles.
+   */
+  appear(now = performance.now()) {
+    this.appearStart = now;
   }
 
   generateBoilTables() {
@@ -452,7 +512,8 @@ export class ScribbleFace {
       }
 
       ctx.translate(cx + shakeX, cy + shakeY);
-      ctx.scale(scale, scale);
+      const appearing = APPEAR[Math.floor((now - this.appearStart) / this.boilInterval)] ?? 1;
+      ctx.scale(scale * appearing, scale * appearing);
 
       // Line style: hand-drawn sketchy ink
       ctx.lineCap = "round";
@@ -464,11 +525,123 @@ export class ScribbleFace {
       if (this.isDead) {
         this.drawDeadFace(ctx);
       } else {
-        this.drawLivingFace(ctx);
+        this.drawMorph(ctx, now);
       }
 
       ctx.restore();
     }
+  }
+
+  /**
+   * The living face, the thought bubble, or one of the drawings between them.
+   */
+  drawMorph(ctx, now) {
+    const drawings = this.thinking ? TO_BUBBLE : TO_FACE;
+    const frame = Math.min(drawings.length - 1, Math.floor((now - this.morphStart) / this.boilInterval));
+    const { face, bubble, poof } = drawings[frame];
+    if (face) this.drawSized(ctx, face, () => this.drawLivingFace(ctx));
+    if (bubble) this.drawSized(ctx, bubble, () => this.drawThoughtBubble(ctx, now));
+    if (poof) this.drawPoof(ctx, poof);
+  }
+
+  drawSized(ctx, [sx, sy], drawing) {
+    ctx.save();
+    ctx.scale(sx, sy);
+    drawing();
+    ctx.restore();
+  }
+
+  /**
+   * A thought bubble: a lumpy cloud trailing little puffs, with "..." appearing in it a dot at a time.
+   */
+  drawThoughtBubble(ctx, now) {
+    const cy = -14;
+
+    ctx.save();
+    ctx.fillStyle = "rgba(255, 255, 255, 0.92)";
+    this.cloudPath(ctx, 0, cy, 54, 36);
+    ctx.fill();
+    ctx.stroke();
+    // A second, lighter line just inside, like the eyes' double strokes, so it reads as sketched.
+    ctx.lineWidth = 2.0;
+    ctx.strokeStyle = "#2b2b2b";
+    this.cloudPath(ctx, 1, cy + 1, 50, 33, 19);
+    ctx.stroke();
+
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = "#141414";
+    for (const [x, y, r, seed] of THOUGHT_TRAIL) {
+      this.drawScribbleLoop(ctx, x, y, r, r * 0.9, 7, 0.8, seed);
+      ctx.fill();
+      ctx.stroke();
+    }
+    ctx.restore();
+
+    // The dots start once the bubble has popped up; each pops in a size too big.
+    const beat = Math.floor((now - this.morphStart) / this.boilInterval) - (TO_BUBBLE.length - 1);
+    if (!this.thinking || beat < 0) return;
+    const step = beat % THINK_BEATS;
+    ctx.fillStyle = "#141414";
+    for (let i = 0; i < 3; i++) {
+      const shows = 1 + i * 3;
+      if (step < shows || step >= THINK_BEATS - 2) continue;
+      const r = step === shows ? 8.5 : 6.5;
+      this.drawScribbleLoop(ctx, (i - 1) * 22, cy + 2, r, r, 6, 0.5, 50 + i * 7);
+      ctx.fill();
+    }
+  }
+
+  /**
+   * The cloud's outline: lumpy puffs round an ellipse, boiling like the rest of the face.
+   */
+  cloudPath(ctx, cx, cy, rx, ry, seed = 0) {
+    const n = CLOUD_PUFFS.length;
+    const corner = (i) => {
+      const a = -Math.PI / 2 + (i / n) * Math.PI * 2 + CLOUD_PUFFS[i % n][1];
+      const b = this.getBoil((i % n) * 5 + seed);
+      return { a, x: cx + rx * Math.cos(a) + b.dx * 0.6, y: cy + ry * Math.sin(a) + b.dy * 0.6 };
+    };
+    ctx.beginPath();
+    let p = corner(0);
+    ctx.moveTo(p.x, p.y);
+    for (let i = 0; i < n; i++) {
+      const q = corner(i + 1);
+      // Push the curve out from the ellipse, and a little past its corners so the puff comes out round.
+      const mid = (p.a + q.a) / 2;
+      let nx = Math.cos(mid) / rx;
+      let ny = Math.sin(mid) / ry;
+      const len = Math.hypot(nx, ny);
+      nx /= len;
+      ny /= len;
+      const push = CLOUD_PUFFS[i][0] * 1.33;
+      const sx = (q.x - p.x) * 0.15;
+      const sy = (q.y - p.y) * 0.15;
+      const b = this.getBoil(i * 7 + seed + 3);
+      ctx.bezierCurveTo(
+        p.x + nx * push - sx + b.dx * 0.5, p.y + ny * push - sy + b.dy * 0.5,
+        q.x + nx * push + sx - b.dy * 0.5, q.y + ny * push + sy + b.dx * 0.5,
+        q.x, q.y,
+      );
+      p = q;
+    }
+    ctx.closePath();
+  }
+
+  /**
+   * A puff of smoke between the face and the bubble: little clouds flung out, shrinking as they go.
+   */
+  drawPoof(ctx, spread) {
+    ctx.save();
+    ctx.fillStyle = "rgba(255, 255, 255, 0.92)";
+    ctx.lineWidth = 2.5;
+    POOF.forEach(([angle, reach, size], i) => {
+      const d = 16 + reach * 46 * spread;
+      const r = size * (1.15 - spread * 0.75);
+      this.drawScribbleLoop(ctx, Math.cos(angle) * d, Math.sin(angle) * d, r, r * 0.9, 6, 0.8, 60 + i * 9);
+      ctx.fill();
+      ctx.stroke();
+    });
+    ctx.restore();
   }
 
   drawLivingFace(ctx) {
