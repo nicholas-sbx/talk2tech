@@ -25,7 +25,7 @@ Any new `audio` or `text` also interrupts the reply in progress.
 | `hello` | `session_id`, `llm`, `voice`, `memory` | Sent on connect. Names of the active backends (mock or real). |
 | `status` | `state`: `idle` · `transcribing` · `waking` · `thinking` · `speaking` | What the backend is doing. |
 | `transcript` | `text` | What the user said. |
-| `persona` | `persona`: `{object, name, personality, speaking_style, voice, greeting, box_2d}`, `box`, `frame_id` | A new object woke up. `box` is where it is in frame `frame_id` (or null). |
+| `persona` | `persona`: `{object, name, personality, speaking_style, voice, greeting, box_2d}`, `box`, `frame_id` | A new object woke up: the first one, or another one the user asked to talk to. `box` is where it is in frame `frame_id` (or null). |
 | `box` | `box`, `frame_id` | The object was found again in a later turn's frame. Sent alongside the reply, at most once per turn. |
 | `say` | `text`, `audio` (b64 MP3 or null) | One sentence of the reply, in order. If `audio` is null, the device speaks `text` itself. |
 | `done` | | Reply finished. |
