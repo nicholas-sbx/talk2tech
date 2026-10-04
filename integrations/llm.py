@@ -13,13 +13,16 @@ log = logging.getLogger(__name__)
 
 RETRYABLE = (429, 500, 503, 504)
 
-BIRTH_PROMPT = f"""Look at this photo and {{pick}}.
-Imagine that object just woke up and can talk. Invent a vivid, witty personality that fits how it
+BIRTH_PROMPT = f"""Look at this photo and find the two most prominent physical objects in it.
+Imagine each object just woke up and can talk. Invent a vivid, witty personality that fits how it
 looks (a cracked mug might be a grumpy veteran, a houseplant a passive-aggressive roommate. Keep the language conversational
 and colloquial, but make sure the personality is evident).
+{pick}
 {{user_context}}
 
-Reply with JSON only, using exactly these keys:
+Reply with JSON only, using exactly this shape:
+- "personas": an array containing exactly two different visible objects
+Each persona must use these keys:
 - "object": what the object is, in a few words
 - "name": a short character name
 - "personality": one sentence
@@ -35,8 +38,8 @@ Reply with JSON only, using exactly these keys:
 
 
 def birth_prompt(focus: str | None = None, user_text: str | None = None) -> str:
-    """The persona prompt, for the most prominent object or for one the user asked for."""
-    pick = f'find the {focus} in it (the user asked to talk to it)' if focus else "pick the single most prominent physical object in it"
+    """The prompt for finding two prominent objects and giving each a persona."""
+    pick = f'ensure the {focus} is one of the two objects (the user asked to talk to it)' if focus else ""
     user_context = (
         f'The user has already said: "{user_text}"\n'
         "Use this as context when choosing the object's personality, speaking style, and greeting. "
@@ -78,7 +81,11 @@ _PERSONA_FIELDS = {
     "box_2d": BOX_SCHEMA,
     "smiley_size": {"type": "number", "minimum": 0.1, "maximum": 1.0},
 }
-PERSONA_SCHEMA = {"type": "object", "properties": _PERSONA_FIELDS, "required": list(_PERSONA_FIELDS)}
+PERSONA_SCHEMA = {
+    "type": "object",
+    "properties": {"personas": {"type": "array", "items": {"type": "object", "properties": _PERSONA_FIELDS, "required": list(_PERSONA_FIELDS)}, "minItems": 2, "maxItems": 2}},
+    "required": ["personas"],
+}
 FOCUS_SCHEMA = {
     "type": "object",
     "properties": {
@@ -230,9 +237,9 @@ class GeminiLLM:
 
         return types.Part.from_bytes(data=image, mime_type="image/jpeg")
 
-    async def make_persona(
+    async def make_personas(
         self, image: bytes | None, focus: str | None = None, user_text: str | None = None
-    ) -> dict:
+    ) -> list[dict]:
         prompt = birth_prompt(focus, user_text)
         contents = [self._image_part(image), prompt] if image else [prompt]
         _, text = await self._stream(
@@ -242,7 +249,14 @@ class GeminiLLM:
                 response_mime_type="application/json", response_json_schema=PERSONA_SCHEMA, temperature=1.0
             ),
         )
-        return _normalize_persona(json.loads("".join([part async for part in text])))
+        raw = json.loads("".join([part async for part in text]))
+        return _normalize_personas(raw.get("personas") if isinstance(raw, dict) else raw)
+
+    async def make_persona(
+        self, image: bytes | None, focus: str | None = None, user_text: str | None = None
+    ) -> dict:
+        """Compatibility wrapper for callers that still need one persona."""
+        return (await self.make_personas(image, focus, user_text))[0]
 
     async def focus(self, image: bytes, object_name: str, user_text: str) -> dict:
         """Which object the user means now, and where it is in this frame.
@@ -326,11 +340,11 @@ MOCK_BOX = [300, 300, 700, 700]  # the middle of the frame
 class MockLLM:
     """Canned persona and replies, so the device and voice loop work with no Gemini key."""
 
-    async def make_persona(
+    async def make_personas(
         self, image: bytes | None, focus: str | None = None, user_text: str | None = None
-    ) -> dict:
+    ) -> list[dict]:
         await asyncio.sleep(0.5)
-        return _normalize_persona(
+        return _normalize_personas([
             {
                 "object": focus or "coffee mug",
                 "name": "Mugsy",
@@ -340,8 +354,23 @@ class MockLLM:
                 "greeting": "Ugh. Who woke me up? I was enjoying being empty.",
                 "box_2d": MOCK_BOX,
                 "smiley_size": 0.6,
-            }
-        )
+            },
+            {
+                "object": "notebook",
+                "name": "Page",
+                "personality": "An optimistic, nosy organizer who wants every thought written down.",
+                "speaking_style": "Bright, curious, and conversational.",
+                "voice": "soft_woman",
+                "greeting": "Oh good, company. What are we thinking about today?",
+                "box_2d": [250, 100, 750, 450],
+                "smiley_size": 0.4,
+            },
+        ])
+
+    async def make_persona(
+        self, image: bytes | None, focus: str | None = None, user_text: str | None = None
+    ) -> dict:
+        return (await self.make_personas(image, focus, user_text))[0]
 
     async def focus(self, image: bytes, object_name: str, user_text: str) -> dict:
         await asyncio.sleep(0.3)
@@ -375,6 +404,26 @@ def _normalize_persona(raw: dict) -> dict:
     persona["box_2d"] = _normalize_box(raw.get("box_2d"))
     persona["smiley_size"] = _normalize_fraction(raw.get("smiley_size"), default=0.5)
     return persona
+
+
+def _normalize_personas(raw) -> list[dict]:
+    """Normalize two personas and guarantee distinct voice categories."""
+    items = raw if isinstance(raw, list) else []
+    personas = [_normalize_persona(item) for item in items[:2] if isinstance(item, dict)]
+    while len(personas) < 2:
+        fallback = _normalize_persona({})
+        fallback["name"] = "Second Thing"
+        fallback["voice"] = "soft_woman" if personas and personas[0].get("voice") != "soft_woman" else "friendly_man"
+        fallback["box_2d"] = None
+        personas.append(fallback)
+    if personas[1].get("voice") == personas[0].get("voice"):
+        alternatives = [key for key in VOICES if key != personas[0].get("voice")]
+        personas[1]["voice"] = alternatives[0]
+    if personas[1].get("personality") == personas[0].get("personality"):
+        personas[1]["personality"] = (
+            f"{personas[1]['personality']} Unlike the other face, it is distinctly more playful and spontaneous."
+        )
+    return personas
 
 
 def _normalize_fraction(raw, default: float) -> float:

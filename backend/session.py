@@ -34,9 +34,12 @@ class Session:
         self.llm = llm
         self.voice = voice
         self.memory = memory
-        self.persona: dict | None = None
+        self.personas: list[dict] = []
+        self.histories: list[list[dict]] = [[], []]
+        self.voice_ids: list[str | None] = [None, None]
+        self.persona: dict | None = None  # compatibility alias for the first face
         self.voice_id: str | None = None
-        self.history: list[dict] = []
+        self.history: list[dict] = self.histories[0]
         self._turn: asyncio.Task | None = None
         # Persona generation started early, from the frame sent when the talk button is pressed.
         self._waking: asyncio.Task | None = None
@@ -81,7 +84,9 @@ class Session:
                     self._cancel_turn()
                     self._cancel_waking()
                     self._cancel_locating()
-                    self.persona, self.voice_id, self.history = None, None, []
+                    self.personas, self.persona = [], None
+                    self.voice_ids, self.histories = [None, None], [[], []]
+                    self.voice_id, self.history = None, self.histories[0]
                     await self.send({"type": "reset"})
         except WebSocketDisconnect:
             pass
@@ -98,8 +103,8 @@ class Session:
         user_text: str | None = None,
     ) -> None:
         """Begin generating the persona while the user is still talking."""
-        if self.persona is None and self._waking is None:
-            self._waking = asyncio.create_task(self.llm.make_persona(image, focus, user_text))
+        if not self.personas and self._waking is None:
+            self._waking = asyncio.create_task(self.llm.make_personas(image, focus, user_text))
             self._waking_frame = frame_id if image else None
 
     def _cancel_waking(self) -> None:
@@ -131,13 +136,15 @@ class Session:
             self._switch_to(found["object"], user_text, image, frame_id)
             return True
         if found["box_2d"]:
-            await self.send({"type": "box", "box": found["box_2d"], "frame_id": frame_id})
+            await self.send({"type": "box", "speaker_id": 0, "box": found["box_2d"], "frame_id": frame_id})
         return False
 
     def _switch_to(self, focus: str, user_text: str, image: bytes, frame_id: str | None) -> None:
         """Drop the current object and wake up the one the user asked for, answering what they said."""
         self._cancel_waking()
-        self.persona, self.voice_id, self.history = None, None, []
+        self.personas, self.persona = [], None
+        self.voice_ids, self.histories = [None, None], [[], []]
+        self.voice_id, self.history = None, self.histories[0]
         self._start_turn(self._respond(user_text, image, frame_id, focus=focus, echo=False))
 
     def _start_turn(self, coro) -> None:
@@ -203,23 +210,28 @@ class Session:
 
         reply: list[str] = []
 
-        def say(sentence: str, record: bool = True) -> None:
+        active_speaker = 0
+
+        def say(sentence: str, record: bool = True, speaker_id: int | None = None) -> None:
             sentence = clean_for_speech(sentence)
             if not sentence:
                 return
             if record:
                 reply.append(sentence)
-            task = asyncio.create_task(self.voice.synthesize(sentence, self.voice_id))
+            speaker = active_speaker if speaker_id is None else speaker_id
+            task = asyncio.create_task(self.voice.synthesize(sentence, self.voice_ids[speaker]))
             pending_tts.append(task)
-            speech.put_nowait((sentence, task))
+            speech.put_nowait((speaker, sentence, task))
 
         try:
             if self.persona is None:
-                await self._birth(image, frame_id, lambda s: say(s, record=False), focus, user_text)
+                await self._birth(
+                    image, frame_id, lambda s, speaker_id=0: say(s, record=False, speaker_id=speaker_id), focus, user_text
+                )
 
             await self.status("thinking")
-            model, words = await self.llm.reply_stream(self.persona, self.history, user_text, image)
-            await self.send({"type": "model", "model": model})
+            model, words = await self.llm.reply_stream(self.personas[0], self.histories[0], user_text, image)
+            await self.send({"type": "model", "model": model, "speaker_id": 0})
             buffer = ""
             async for delta in words:
                 buffer += delta
@@ -228,6 +240,26 @@ class Session:
                     say(s)
             say(buffer)
 
+            first_reply = " ".join(reply)
+            self.histories[0] += [{"role": "user", "text": user_text}, {"role": "model", "text": first_reply}]
+            self.histories[0] = self.histories[0][-MAX_HISTORY:]
+
+            # Face 2 hears Face 1's words, not the user's raw turn.
+            active_speaker = 1
+            second_reply: list[str] = []
+            second_input = f"Face 1 said: {first_reply}"
+            model, words = await self.llm.reply_stream(self.personas[1], self.histories[1], second_input, image)
+            await self.send({"type": "model", "model": model, "speaker_id": 1})
+            buffer = ""
+            async for delta in words:
+                buffer += delta
+                sentences, buffer = pop_sentences(buffer)
+                for s in sentences:
+                    say(s)
+                    second_reply.append(clean_for_speech(s))
+            if buffer:
+                say(buffer)
+                second_reply.append(clean_for_speech(buffer))
             speech.put_nowait(None)
             await speaker
         except BaseException as exc:
@@ -256,9 +288,8 @@ class Session:
             raise
 
         reply_text = " ".join(reply)
-        self.history += [{"role": "user", "text": user_text}, {"role": "model", "text": reply_text}]
-        self.history = self.history[-MAX_HISTORY:]
-        name = self.persona["name"]
+        self.history = self.histories[0]
+        name = self.personas[0]["name"]
         self.memory.log(
             self.id,
             "turn",
@@ -269,6 +300,21 @@ class Session:
                 "status": "success",
                 "time_to_first_audio_ms": self._first_audio_ms,
                 "duration_ms": round((time.perf_counter() - self._turn_start) * 1000),
+                "llm": type(self.llm).__name__,
+                "voice": type(self.voice).__name__,
+            },
+        )
+        self.histories[1] += [{"role": "user", "text": second_input}, {"role": "model", "text": " ".join(second_reply)}]
+        self.histories[1] = self.histories[1][-MAX_HISTORY:]
+        self.memory.log(
+            self.id,
+            "turn",
+            self.personas[1]["name"],
+            {
+                "user": second_input,
+                "reply": " ".join(second_reply),
+                "status": "success",
+                "speaker_id": 1,
                 "llm": type(self.llm).__name__,
                 "voice": type(self.voice).__name__,
             },
@@ -297,25 +343,36 @@ class Session:
         except Exception:
             self._waking = None  # let the next turn try again
             raise
-        self.persona, self._waking = persona, None
+        self.personas, self._waking = persona, None
+        self.persona = self.personas[0]
+        self.histories = [[], []]
+        self.history = self.histories[0]
         frame_id, self._waking_frame = self._waking_frame, None
         log.info("[timing] persona ready %.2fs after release", time.perf_counter() - self._turn_start)
-        self.voice_id = voice_id_for(self.persona.get("voice"))
-        # box is where the object sits in frame frame_id, so the device can pin its AR marker there.
-        await self.send({"type": "persona", "persona": self.persona, "box": persona["box_2d"], "frame_id": frame_id})
-        self.memory.log(self.id, "object", self.persona["name"], self.persona)
-
-        greeting = self.persona["greeting"]
-        sentences, rest = pop_sentences(greeting + " ")
-        for s in sentences + ([rest.strip()] if rest.strip() else []):
-            say(s)
-        self.history.append({"role": "model", "text": clean_for_speech(greeting)})
+        self.voice_ids = [voice_id_for(item.get("voice")) for item in self.personas]
+        self.voice_id = self.voice_ids[0]
+        for speaker_id, persona in enumerate(self.personas):
+            await self.send(
+                {
+                    "type": "persona",
+                    "speaker_id": speaker_id,
+                    "persona": persona,
+                    "box": persona["box_2d"],
+                    "frame_id": frame_id,
+                }
+            )
+            self.memory.log(self.id, "object", persona["name"], {**persona, "speaker_id": speaker_id})
+            greeting = persona["greeting"]
+            sentences, rest = pop_sentences(greeting + " ")
+            for s in sentences + ([rest.strip()] if rest.strip() else []):
+                say(s, speaker_id=speaker_id)
+            self.histories[speaker_id].append({"role": "model", "text": clean_for_speech(greeting)})
 
     async def _speak_in_order(self, speech: asyncio.Queue) -> None:
         """Send sentences to the device in order, as soon as each one's audio is ready."""
         first = True
         while (item := await speech.get()) is not None:
-            sentence, tts = item
+            speaker_id, sentence, tts = item
             audio = await tts
             if first:
                 self._first_audio_ms = round((time.perf_counter() - self._turn_start) * 1000)
@@ -325,6 +382,7 @@ class Session:
             await self.send(
                 {
                     "type": "say",
+                    "speaker_id": speaker_id,
                     "text": sentence,
                     "audio": base64.b64encode(audio).decode() if audio else None,
                 }

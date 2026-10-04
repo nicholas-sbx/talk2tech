@@ -87,9 +87,7 @@ let XR8 = null;
 let canvas = null;
 let gl = null;
 let running = false;
-let smiley, faceCanvas, faceTexture;
-let inkCanvas, rimCanvas; // the face's lines, and their silhouette in the outline colour
-const face = new ScribbleFace();
+const markers = [];
 let voice = null; // analyser on the reply as it plays, while the mouth follows it
 let voiceSamples = null;
 let voicePeak = VOICE_PEAK_MIN;
@@ -112,10 +110,6 @@ let statsShown = 0;
 
 // Where the smiley sits: a point on the surface, the surface normal (towards the camera), the
 // direction its top should face, and its diameter.
-let placement = null;
-let targetPosition = null;
-let targetQuaternion = null;
-let size = 0.1;
 let updates = 0; // frames since start, to space out surface re-checks
 
 // World tracking needs a phone's camera and motion sensors.
@@ -221,9 +215,10 @@ export function captureFrame() {
 
 // box: Gemini box_2d [ymin, xmin, ymax, xmax] (0-1000) for the frame captureFrame() named frameId.
 // fit: the smiley's diameter as a share of the object's visible width, as Gemini chose it.
-export function placeBox(box, frameId, fit = DEFAULT_SMILEY_SIZE) {
+export function placeBox(box, frameId, fit = DEFAULT_SMILEY_SIZE, speakerId = 0) {
   stats.boxes++;
   if (!running || !box) return;
+  const marker = markers[speakerId] || markers[0];
   // No saved pose (the frame wasn't captured in AR): use the camera as it is now. Close enough
   // unless the phone moved a lot since.
   const snap = snapshots.get(frameId) ?? snapshot();
@@ -282,29 +277,32 @@ export function placeBox(box, frameId, fit = DEFAULT_SMILEY_SIZE) {
   const up = new THREE.Vector3(0, 1, 0).transformDirection(snap.cameraToWorld);
 
   // Same object again (a later turn): nudge the smiley rather than jumping to a noisier estimate.
-  if (placement && placement.point.distanceTo(point) < SAME_SPOT * Math.max(side, placement.size)) {
-    placement.point.lerp(point, RELOCATE_BLEND);
-    placement.home.lerp(point, RELOCATE_BLEND);
-    placement.leash += (depth * REFINE_LEASH - placement.leash) * RELOCATE_BLEND;
-    limitTilt(placement.normal.lerp(normal, RELOCATE_BLEND).normalize(), origin.clone().sub(placement.point));
-    placement.size += (side - placement.size) * RELOCATE_BLEND;
+  if (marker.placement && marker.placement.point.distanceTo(point) < SAME_SPOT * Math.max(side, marker.placement.size)) {
+    marker.placement.point.lerp(point, RELOCATE_BLEND);
+    marker.placement.home.lerp(point, RELOCATE_BLEND);
+    marker.placement.leash += (depth * REFINE_LEASH - marker.placement.leash) * RELOCATE_BLEND;
+    limitTilt(marker.placement.normal.lerp(normal, RELOCATE_BLEND).normalize(), origin.clone().sub(marker.placement.point));
+    marker.placement.size += (side - marker.placement.size) * RELOCATE_BLEND;
     source += ", blended";
   } else {
     // home and leash: where the box put it, and how far re-checks may move it from there.
-    placement = { point, normal, up, size: side, home: point.clone(), leash: depth * REFINE_LEASH };
+    marker.placement = { point, normal, up, size: side, home: point.clone(), leash: depth * REFINE_LEASH };
   }
-  revive();
-  aimMarker();
+  revive(marker);
+  aimMarker(marker);
 
   const fmt = (v) => v.toArray().map((n) => n.toFixed(2)).join(", ");
-  stats.lastBox = `${frameId}: depth ${depth.toFixed(2)} (${source}), diameter ${side.toFixed(2)} (${Math.round(fit * 100)}% of object), normal ${fmt(placement.normal)}`;
+  stats.lastBox = `${frameId}: depth ${depth.toFixed(2)} (${source}), diameter ${side.toFixed(2)} (${Math.round(fit * 100)}% of object), normal ${fmt(marker.placement.normal)}`;
 }
 
-export function clearMarker() {
-  placement = null;
-  targetPosition = null;
-  if (smiley) smiley.visible = false;
-  revive();
+export function clearMarker(speakerId = null) {
+  const selected = speakerId == null ? markers : [markers[speakerId] || markers[0]];
+  selected.forEach((marker) => {
+    marker.placement = null;
+    marker.targetPosition = null;
+    marker.smiley.visible = false;
+    revive(marker);
+  });
 }
 
 // Calls back when the face dies, so whatever it was saying can be cut off.
@@ -327,55 +325,57 @@ function setScreaming(on) {
 // Moves the face's mouth while a reply plays. Given the analyser the reply plays through, the mouth
 // opens as wide as it's loud; without one (e.g. the browser's own speech) it just flaps.
 export function setSpeaking(on, analyser = null) {
-  face.speaking = Boolean(on);
+  markers.forEach(({ face }) => {
+    face.speaking = Boolean(on);
+    face.mouthLevel = on && analyser ? 0 : null;
+  });
   voice = on ? analyser : null;
-  face.mouthLevel = voice ? 0 : null;
 }
 
 // Back from the dead (or calm again): a fresh placement starts unafraid.
-function revive() {
-  face.isDead = false;
-  face.panic = 0;
+function revive(marker) {
+  marker.face.isDead = false;
+  marker.face.panic = 0;
   audio?.reset();
   setScreaming(false);
 }
 
 // Turns the placement into the smiley's pose: its back flat on the surface, its face along the
 // normal, and its top towards `up` (the camera's up when it was placed) as far as the surface allows.
-function aimMarker() {
-  const { point, normal, up } = placement;
+function aimMarker(marker) {
+  const { point, normal, up } = marker.placement;
   let top = up.clone().addScaledVector(normal, -up.dot(normal));
   if (top.lengthSq() < 1e-6) top = new THREE.Vector3(0, 0, -1).addScaledVector(normal, normal.z);
   top.normalize();
   const side = top.clone().cross(normal);
-  targetQuaternion = new THREE.Quaternion().setFromRotationMatrix(new THREE.Matrix4().makeBasis(side, top, normal));
-  targetPosition = point.clone();
+  marker.targetQuaternion = new THREE.Quaternion().setFromRotationMatrix(new THREE.Matrix4().makeBasis(side, top, normal));
+  marker.targetPosition = point.clone();
 }
 
 // Re-checks the surface under the smiley with a few hit tests around where it appears on screen,
 // and eases the smiley's depth and angle onto it. Only depth along the line of sight is corrected:
 // sideways position comes from Gemini's boxes.
-function refineOnSurface(camera) {
-  if (!placement || reality?.trackingStatus !== "NORMAL") return;
+function refineOnSurface(marker, camera) {
+  if (!marker.placement || reality?.trackingStatus !== "NORMAL") return;
   camera.updateMatrixWorld();
-  const centre = placement.point.clone().project(camera);
+  const centre = marker.placement.point.clone().project(camera);
   if (centre.z > 1 || Math.abs(centre.x) > 0.9 || Math.abs(centre.y) > 0.9) return; // off screen
 
   const eye = new THREE.Vector3().setFromMatrixPosition(camera.matrixWorld);
-  const toPoint = placement.point.clone().sub(eye);
+  const toPoint = marker.placement.point.clone().sub(eye);
   const distance = toPoint.length();
   const sight = toPoint.normalize();
 
   // The smiley's half-width on screen, in hit-test units (0-1 across the canvas).
   const side = new THREE.Vector3(1, 0, 0).transformDirection(camera.matrixWorld);
-  const edge = placement.point.clone().addScaledVector(side, placement.size / 2).project(camera);
+  const edge = marker.placement.point.clone().addScaledVector(side, marker.placement.size / 2).project(camera);
   const rx = THREE.MathUtils.clamp(Math.abs(edge.x - centre.x) / 2, 0.01, 0.2);
   const ry = rx * (canvas.width / canvas.height);
   const sx = (centre.x + 1) / 2;
   const sy = (1 - centre.y) / 2;
 
   // Keep hits near the line of sight to the smiley and near its current depth.
-  const reach = placement.size + 0.02;
+  const reach = marker.placement.size + 0.02;
   const hits = [];
   for (let gy = 0; gy < REFINE_GRID; gy++) {
     for (let gx = 0; gx < REFINE_GRID; gx++) {
@@ -393,18 +393,18 @@ function refineOnSurface(camera) {
 
   const along = median(hits.map((h) => h.along));
   const moved = eye.clone().addScaledVector(sight, distance + (along - distance) * DEPTH_GAIN);
-  const offset = moved.clone().sub(placement.home);
-  if (offset.length() > placement.leash) moved.copy(placement.home).addScaledVector(offset.normalize(), placement.leash);
-  placement.point = moved;
+  const offset = moved.clone().sub(marker.placement.home);
+  if (offset.length() > marker.placement.leash) moved.copy(marker.placement.home).addScaledVector(offset.normalize(), marker.placement.leash);
+  marker.placement.point = moved;
   const plane = fitPlane(hits.map((h) => h.at));
   if (plane) {
     const towardEye = sight.clone().negate();
     limitTilt(plane.normal, towardEye);
-    limitTilt(placement.normal.lerp(plane.normal, NORMAL_GAIN).normalize(), towardEye);
+    limitTilt(marker.placement.normal.lerp(plane.normal, NORMAL_GAIN).normalize(), towardEye);
   }
   stats.refines++;
   stats.lastRefine = `${hits.length} hits${plane ? ", plane" : ""}`;
-  aimMarker();
+  aimMarker(marker);
 }
 
 // Points `normal` (in place) toward `toward`'s side, tilted at most MAX_TILT away from it.
@@ -544,12 +544,13 @@ function showStats() {
   if (!el) return;
   const tracking = reality ? `${reality.trackingStatus} ${reality.trackingReason}` : "no tracking yet";
   let markerState = "not placed";
-  if (placement && smiley) {
+  const marker = markers[0];
+  if (marker?.placement) {
     const { camera } = XR8.Threejs.xrScene();
-    const at = smiley.position.clone().project(camera);
+    const at = marker.smiley.position.clone().project(camera);
     const onScreen = at.z < 1 && Math.abs(at.x) <= 1 && Math.abs(at.y) <= 1;
     const where = `screen ${Math.round((at.x + 1) * 50)}%, ${Math.round((1 - at.y) * 50)}%${onScreen ? "" : " (off screen)"}`;
-    const mood = face.isDead ? "dead" : `panic ${face.panic.toFixed(2)}`;
+    const mood = marker.face.isDead ? "dead" : `panic ${marker.face.panic.toFixed(2)}`;
     markerState = `${where}, ${mood}, ${stats.refines} surface re-checks (last: ${stats.lastRefine || "none"})`;
   }
   el.textContent = [
@@ -618,12 +619,17 @@ function sceneModule() {
     name: "talk2tech-scene",
     onStart: () => {
       const { scene, camera } = XR8.Threejs.xrScene();
-      scene.add(makeSmiley());
+      markers.length = 0;
+      markers.push(makeSmiley(), makeSmiley());
+      markers.forEach((marker) => scene.add(marker.smiley));
       camera.position.set(0, CAMERA_HEIGHT, 0);
       XR8.XrController.updateCameraProjectionMatrix({ origin: camera.position, facing: camera.quaternion });
     },
     onUpdate: () => {
-      if (++updates % REFINE_EVERY === 0) refineOnSurface(XR8.Threejs.xrScene().camera);
+      if (++updates % REFINE_EVERY === 0) {
+        const camera = XR8.Threejs.xrScene().camera;
+        markers.forEach((marker) => refineOnSurface(marker, camera));
+      }
       animateMarker(performance.now(), XR8.Threejs.xrScene().camera);
     },
   };
@@ -634,12 +640,12 @@ function sceneModule() {
 // A unit-diameter face: a transparent square, FACE_PLANE diameters across, facing +Z at z = 0 with
 // the scribble face drawn on it, so it can be stuck flat onto a surface.
 function makeSmiley() {
-  [faceCanvas, inkCanvas, rimCanvas] = [0, 0, 0].map(() => {
+  const [faceCanvas, inkCanvas, rimCanvas] = [0, 0, 0].map(() => {
     const c = document.createElement("canvas");
     c.width = c.height = FACE_PIXELS;
     return c;
   });
-  faceTexture = new THREE.CanvasTexture(faceCanvas);
+  const faceTexture = new THREE.CanvasTexture(faceCanvas);
   faceTexture.colorSpace = THREE.SRGBColorSpace;
   // Drawn last and over everything (there's no real-world occlusion anyway), so nothing in the GL
   // state left by the camera feed can hide it.
@@ -653,56 +659,69 @@ function makeSmiley() {
   const mesh = new THREE.Mesh(new THREE.PlaneGeometry(FACE_PLANE, FACE_PLANE), material);
   mesh.renderOrder = 10;
   mesh.frustumCulled = false;
-  smiley = new THREE.Group();
+  const smiley = new THREE.Group();
   smiley.add(mesh);
   smiley.visible = false;
-  return smiley;
+  return {
+    smiley,
+    face: new ScribbleFace(),
+    faceCanvas,
+    inkCanvas,
+    rimCanvas,
+    faceTexture,
+    placement: null,
+    targetPosition: null,
+    targetQuaternion: null,
+    size: 0.1,
+  };
 }
 
 function animateMarker(time, camera) {
-  if (!targetPosition) return;
-  if (!smiley.visible) {
-    smiley.position.copy(targetPosition);
-    smiley.quaternion.copy(targetQuaternion);
-    size = placement.size;
-    smiley.visible = true;
-  } else {
-    smiley.position.lerp(targetPosition, FOLLOW);
-    smiley.quaternion.slerp(targetQuaternion, FOLLOW);
-    size += (placement.size - size) * FOLLOW;
-  }
-  smiley.scale.setScalar(size);
-  feelTheEdges(camera, time);
-  if (voice) listen();
-  drawFace(time);
+  markers.forEach((marker) => {
+    if (!marker.targetPosition) return;
+    if (!marker.smiley.visible) {
+      marker.smiley.position.copy(marker.targetPosition);
+      marker.smiley.quaternion.copy(marker.targetQuaternion);
+      marker.size = marker.placement.size;
+      marker.smiley.visible = true;
+    } else {
+      marker.smiley.position.lerp(marker.targetPosition, FOLLOW);
+      marker.smiley.quaternion.slerp(marker.targetQuaternion, FOLLOW);
+      marker.size += (marker.placement.size - marker.size) * FOLLOW;
+    }
+    marker.smiley.scale.setScalar(marker.size);
+    feelTheEdges(marker, camera, time);
+    if (voice) listen(marker);
+    drawFace(marker, time);
+  });
 }
 
 // The face, with its silhouette stamped in a ring behind it as an outline.
-function drawFace(time) {
-  const ink = inkCanvas.getContext("2d");
+function drawFace(marker, time) {
+  const ink = marker.inkCanvas.getContext("2d");
   ink.clearRect(0, 0, FACE_PIXELS, FACE_PIXELS);
-  face.draw(ink, FACE_PIXELS / 2, FACE_PIXELS / 2, FACE_PIXELS / (FACE_UNITS * FACE_PLANE), time);
+  marker.face.draw(ink, FACE_PIXELS / 2, FACE_PIXELS / 2, FACE_PIXELS / (FACE_UNITS * FACE_PLANE), time);
 
-  const rim = rimCanvas.getContext("2d");
+  const rim = marker.rimCanvas.getContext("2d");
   rim.clearRect(0, 0, FACE_PIXELS, FACE_PIXELS);
-  rim.drawImage(inkCanvas, 0, 0);
+  rim.drawImage(marker.inkCanvas, 0, 0);
   rim.globalCompositeOperation = "source-in";
   rim.fillStyle = OUTLINE_COLOR;
   rim.fillRect(0, 0, FACE_PIXELS, FACE_PIXELS);
   rim.globalCompositeOperation = "source-over";
 
-  const ctx = faceCanvas.getContext("2d");
+  const ctx = marker.faceCanvas.getContext("2d");
   ctx.clearRect(0, 0, FACE_PIXELS, FACE_PIXELS);
   for (let i = 0; i < OUTLINE_STEPS; i++) {
     const angle = (i / OUTLINE_STEPS) * Math.PI * 2;
-    ctx.drawImage(rimCanvas, Math.cos(angle) * OUTLINE_PX, Math.sin(angle) * OUTLINE_PX);
+    ctx.drawImage(marker.rimCanvas, Math.cos(angle) * OUTLINE_PX, Math.sin(angle) * OUTLINE_PX);
   }
-  ctx.drawImage(inkCanvas, 0, 0);
-  faceTexture.needsUpdate = true;
+  ctx.drawImage(marker.inkCanvas, 0, 0);
+  marker.faceTexture.needsUpdate = true;
 }
 
 // Sets how far the mouth is open from how loud the reply is right now.
-function listen() {
+function listen(marker) {
   if (voiceSamples?.length !== voice.fftSize) voiceSamples = new Float32Array(voice.fftSize);
   voice.getFloatTimeDomainData(voiceSamples);
   let sum = 0;
@@ -710,15 +729,15 @@ function listen() {
   const loudness = Math.sqrt(sum / voiceSamples.length);
   voicePeak = Math.max(loudness, voicePeak * VOICE_PEAK_FADE, VOICE_PEAK_MIN);
   const target = loudness < VOICE_SILENT ? 0 : Math.min(1, loudness / voicePeak);
-  const level = face.mouthLevel ?? 0;
-  face.mouthLevel = level + (target - level) * (target > level ? MOUTH_OPEN : MOUTH_CLOSE);
+  const level = marker.face.mouthLevel ?? 0;
+  marker.face.mouthLevel = level + (target - level) * (target > level ? MOUTH_OPEN : MOUTH_CLOSE);
 }
 
 // Which way the eyes turn to look at the camera, from the face's point of view: x right, y down,
 // at most 1 in any direction.
-function gazeAtCamera(camera) {
-  smiley.updateMatrixWorld();
-  const you = smiley.worldToLocal(new THREE.Vector3().setFromMatrixPosition(camera.matrixWorld));
+function gazeAtCamera(marker, camera) {
+  marker.smiley.updateMatrixWorld();
+  const you = marker.smiley.worldToLocal(new THREE.Vector3().setFromMatrixPosition(camera.matrixWorld));
   if (you.z <= 0) return { x: 0, y: 0 }; // seen from behind
   const x = (you.x / you.z) * GAZE_GAIN;
   const y = (-you.y / you.z) * GAZE_GAIN;
@@ -728,30 +747,30 @@ function gazeAtCamera(camera) {
 
 // Where the face is on screen: calm, it looks at you; near an edge it panics, looks at that edge
 // and screams; past it (or behind the camera) it dies.
-function feelTheEdges(camera, time) {
-  if (face.isDead) return;
+function feelTheEdges(marker, camera, time) {
+  if (marker.face.isDead) return;
   camera.updateMatrixWorld();
-  const behind = smiley.position.clone().applyMatrix4(camera.matrixWorldInverse).z >= 0;
-  const at = smiley.position.clone().project(camera);
+  const behind = marker.smiley.position.clone().applyMatrix4(camera.matrixWorldInverse).z >= 0;
+  const at = marker.smiley.position.clone().project(camera);
   const u = (at.x + 1) / 2;
   const v = (1 - at.y) / 2;
   if (EdgeFearSystem.isOffscreen(u, v, OFFSCREEN_MARGIN, behind)) {
-    face.isDead = true;
+    marker.face.isDead = true;
     audio?.triggerDeathSequence();
     deathListener?.();
     setScreaming(false);
     return;
   }
-  face.panic = EdgeFearSystem.computePanic(EdgeFearSystem.computeEdgeDistances(u, v).d);
+  marker.face.panic = EdgeFearSystem.computePanic(EdgeFearSystem.computeEdgeDistances(u, v).d);
   const edges = { left: { x: -1, y: 0 }, right: { x: 1, y: 0 }, top: { x: 0, y: -1 }, bottom: { x: 0, y: 1 } };
   const edge = edges[EdgeFearSystem.getNearestEdge(u, v)];
-  const you = gazeAtCamera(camera);
-  face.gazeDirection = {
-    x: you.x + (edge.x - you.x) * face.panic,
-    y: you.y + (edge.y - you.y) * face.panic,
+  const you = gazeAtCamera(marker, camera);
+  marker.face.gazeDirection = {
+    x: you.x + (edge.x - you.x) * marker.face.panic,
+    y: you.y + (edge.y - you.y) * marker.face.panic,
   };
-  audio?.updatePanic(face.panic);
-  if (face.panic > 0) {
+  audio?.updatePanic(marker.face.panic);
+  if (marker.face.panic > 0) {
     lastScream = time;
     setScreaming(true);
   } else if (time - lastScream > SCREAM_HOLD_MS) {
