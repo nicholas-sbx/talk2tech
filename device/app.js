@@ -11,7 +11,6 @@ const textInput = $("#text-input");
 
 const STATUS_TEXT = {
   idle: "Hold to talk",
-  opening: "One sec…",
   listening: "Listening…",
   transcribing: "Hearing you…",
   waking: "Hold on, it's waking up…",
@@ -24,19 +23,25 @@ const MIN_CLIP_MS = 300;
 const CAMERA_RETRY_MS = 2000;
 const VIDEO = { facingMode: "environment", width: { ideal: 1280 }, height: { ideal: 720 } };
 const AUDIO = { echoCancellation: true, noiseSuppression: true };
+const MIC_REOPEN_MS = 400;
 
 let ws;
 let camStream = null;
 let camRetry = null;
-let micAllowed = false; // permission granted at start; the mic itself only opens while the button is held
+let micAllowed = false;
+// The mic stays open while idle so pressing records instantly, and closes while a reply plays:
+// a live mic puts iOS in "phone call" audio mode, which ducks and pumps the speaker.
+let micStream = null;
+let micOpening = null;
+let micReopen = null;
 let recorder = null;
 let held = false;
-let pressId = 0;
 let recordStart = 0;
 let pressFrame = null;
 let audioCtx = null;
 let playChain = Promise.resolve();
 let playGen = 0; // bumped on interrupt so queued audio is dropped
+let pendingSpeech = 0;
 let currentSource = null;
 let thingLine = null;
 
@@ -51,15 +56,13 @@ $("#start-btn").addEventListener("click", async () => {
   try {
     const stream = await navigator.mediaDevices.getUserMedia({ video: VIDEO, audio: AUDIO });
     useCamera(new MediaStream(stream.getVideoTracks()));
-    // Only wanted the permission: a live mic keeps iOS in "phone call" audio mode, which ducks playback.
     micAllowed = stream.getAudioTracks().length > 0;
-    stream.getAudioTracks().forEach((t) => t.stop());
+    if (micAllowed) useMic(new MediaStream(stream.getAudioTracks()));
   } catch (err) {
     console.warn(err);
     // One of the two failed: get the mic on its own and keep retrying the camera in the background.
     try {
-      const mic = await navigator.mediaDevices.getUserMedia({ audio: AUDIO });
-      mic.getTracks().forEach((t) => t.stop());
+      useMic(await navigator.mediaDevices.getUserMedia({ audio: AUDIO }));
       micAllowed = true;
     } catch (micErr) {
       console.warn(micErr);
@@ -70,7 +73,6 @@ $("#start-btn").addEventListener("click", async () => {
     }
     if (window.isSecureContext) retryCamera();
   }
-  setAudioSession("playback");
   $("#start").hidden = true;
   document.querySelector('meta[name="theme-color"]').content = "#000000";
   connect();
@@ -195,31 +197,72 @@ function setAudioSession(type) {
 }
 
 addEventListener("pagehide", () => setAudioSession("auto"));
+// iOS ends capture in the background; get the mic back when the page returns.
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") scheduleMicReopen();
+});
 
-async function openMic() {
-  // "auto" becomes play-and-record on its own once capture starts.
-  setAudioSession("auto");
-  try {
-    return await navigator.mediaDevices.getUserMedia({ audio: AUDIO });
-  } catch (err) {
-    // Safari can reject capture while the "playback" session is still being swapped out; retry once.
-    if (!navigator.audioSession) throw err;
-    console.warn(err);
-    await new Promise((r) => setTimeout(r, 250));
-    return navigator.mediaDevices.getUserMedia({ audio: AUDIO });
-  }
+function micLive() {
+  return micStream?.getAudioTracks().some((t) => t.readyState === "live");
 }
 
-function closeMic(stream) {
-  stream.getTracks().forEach((t) => t.stop());
+function useMic(stream) {
+  micStream = stream;
+  stream.getAudioTracks()[0]?.addEventListener("ended", () => {
+    if (micStream === stream) micStream = null;
+  });
+}
+
+// Resolves to an open mic stream, opening one if needed.
+function getMic() {
+  if (micLive()) return Promise.resolve(micStream);
+  if (!micOpening) {
+    // "auto" becomes play-and-record on its own once capture starts.
+    setAudioSession("auto");
+    micOpening = navigator.mediaDevices
+      .getUserMedia({ audio: AUDIO })
+      .catch(async (err) => {
+        // Safari can reject capture while the "playback" session is still being swapped out; retry once.
+        if (!navigator.audioSession) throw err;
+        console.warn(err);
+        await new Promise((r) => setTimeout(r, 250));
+        return navigator.mediaDevices.getUserMedia({ audio: AUDIO });
+      })
+      .then((stream) => {
+        // A reply started playing while we were opening: don't hold the mic over it.
+        if (speaking() && !recorder && !held) {
+          stream.getTracks().forEach((t) => t.stop());
+          setAudioSession("playback");
+          return null;
+        }
+        useMic(stream);
+        return stream;
+      })
+      .finally(() => (micOpening = null));
+  }
+  return micOpening;
+}
+
+function releaseMic() {
+  clearTimeout(micReopen);
+  if (recorder || held || !micStream) return;
+  micStream.getTracks().forEach((t) => t.stop());
+  micStream = null;
   setAudioSession("playback");
+}
+
+function scheduleMicReopen() {
+  clearTimeout(micReopen);
+  if (!micAllowed) return;
+  micReopen = setTimeout(() => {
+    if (!speaking()) getMic().catch((err) => console.warn(err));
+  }, MIC_REOPEN_MS);
 }
 
 async function startRecording(ev) {
   ev.preventDefault();
   if (!micAllowed || held || recorder) return;
   held = true;
-  const id = ++pressId;
   talkBtn.setPointerCapture?.(ev.pointerId);
   stopSpeech();
   audioCtx?.resume();
@@ -228,32 +271,26 @@ async function startRecording(ev) {
   // Lets a new object start waking up while you're still talking.
   if (pressFrame) send({ type: "frame", image: pressFrame });
   talkBtn.classList.add("recording");
-  setStatus("opening");
+  setStatus("listening");
 
+  // Instant when idle; only after interrupting a reply does the mic need to reopen first.
   let stream;
   try {
-    stream = await openMic();
+    stream = await getMic();
   } catch (err) {
     console.warn(err);
     talkBtn.classList.remove("recording");
     held = false;
-    setAudioSession("playback");
     line("error", `Mic unavailable: ${err.message}`);
     return setStatus("idle");
   }
-  // Let go (or pressed again) before the mic came up: nothing to record.
-  if (id !== pressId || !held) {
-    closeMic(stream);
-    if (id === pressId) setStatus("idle");
-    return;
-  }
+  if (!held || recorder) return setStatus("idle"); // let go before the mic came up
 
   const mime = pickMime();
   const chunks = [];
   recorder = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
   recorder.ondataavailable = (e) => e.data.size && chunks.push(e.data);
   recorder.onstop = async () => {
-    closeMic(stream);
     const tooShort = performance.now() - recordStart < MIN_CLIP_MS;
     recorder = null;
     if (tooShort || !chunks.length) return setStatus("idle");
@@ -262,7 +299,6 @@ async function startRecording(ev) {
   };
   recorder.start();
   recordStart = performance.now();
-  setStatus("listening");
 }
 
 function stopRecording() {
@@ -322,8 +358,14 @@ $("#reset").addEventListener("click", () => {
 
 // ---------- playback ----------
 
+function speaking() {
+  return pendingSpeech > 0;
+}
+
 function enqueueSpeech(text, audioB64) {
   const gen = playGen;
+  pendingSpeech++;
+  releaseMic();
   // Decode now, in parallel with whatever is playing; play strictly in order.
   const decoded = audioB64
     ? audioCtx.decodeAudioData(base64ToBuffer(audioB64)).catch(() => null)
@@ -333,6 +375,10 @@ function enqueueSpeech(text, audioB64) {
     const buffer = await decoded;
     if (gen !== playGen) return;
     await (buffer ? playBuffer(buffer) : speakLocally(text));
+  }).finally(() => {
+    if (gen !== playGen) return;
+    // Reply finished: reopen the mic so the next press is instant.
+    if (--pendingSpeech === 0) scheduleMicReopen();
   });
 }
 
@@ -363,7 +409,9 @@ function speakLocally(text) {
 
 function stopSpeech() {
   playGen++;
+  pendingSpeech = 0;
   playChain = Promise.resolve();
+  scheduleMicReopen();
   if (currentSource) {
     try { currentSource.stop(); } catch {}
     currentSource = null;
