@@ -98,10 +98,12 @@ class Session:
             self._cancel_waking()
             self._cancel_locating()
 
-    def _start_waking(self, image: bytes | None, frame_id: str | None, focus: str | None = None) -> None:
+    def _start_waking(
+        self, image: bytes | None, frame_id: str | None, focus: str | None = None, user_text: str | None = None
+    ) -> None:
         """Begin generating the persona while the user is still talking."""
         if self.persona is None and self._waking is None:
-            self._waking = asyncio.create_task(self.llm.make_persona(image, focus))
+            self._waking = asyncio.create_task(self.llm.make_persona(image, focus, user_text))
             self._waking_frame = frame_id if image else None
 
     def _cancel_waking(self) -> None:
@@ -220,7 +222,7 @@ class Session:
 
         try:
             if self.persona is None:
-                await self._birth(image, frame_id, lambda s: say(s, record=False), focus)
+                await self._birth(image, frame_id, lambda s: say(s, record=False), focus, user_text)
 
             await self.status("thinking")
             model, words = await self.llm.reply_stream(self.persona, self.history, user_text, image)
@@ -250,10 +252,14 @@ class Session:
         name = self.persona["name"]
         self.memory.log(self.id, "turn", name, {"user": user_text, "reply": reply_text})
 
-    async def _birth(self, image: bytes | None, frame_id: str | None, say, focus: str | None = None) -> None:
+    async def _birth(
+        self, image: bytes | None, frame_id: str | None, say, focus: str | None = None, user_text: str | None = None
+    ) -> None:
         """First sight of an object: identify it and give it a personality and voice."""
         await self.status("waking")
-        self._start_waking(image, frame_id, focus)  # no-op if the button press already started it
+        # No-op if the button press already started it, in which case the persona is made without the
+        # user's words: restarting it to include them would cost more wait than it's worth.
+        self._start_waking(image, frame_id, focus, user_text)
         try:
             # Shielded so an interrupted turn doesn't throw away a persona that's nearly ready.
             persona = await asyncio.shield(self._waking)
