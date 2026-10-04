@@ -14,8 +14,20 @@ log = logging.getLogger(__name__)
 RETRYABLE = (429, 500, 503, 504)
 
 BIRTH_PROMPT = f"""Look at this photo and {{pick}}.
-Imagine that object just woke up and can talk. Invent a vivid, funny personality that fits how it
-looks (a cracked mug might be a grumpy veteran, a houseplant a passive-aggressive roommate).
+Imagine that object just woke up and can talk. 
+
+Base its personality on the colour of the object: use the saturation and 
+brightness for traits or a fitting character archetype (for example, a 
+grey hat might have a more negative personality while a bright pink hat 
+may have a more positive personality). Avoid generic personalities; make 
+the result feel specific to this object.
+
+Choose a speaking style and voice preset that reinforce that personality.
+Choose only a voice key from the list below. If the image is missing or
+the object's appearance is unclear, make a light, imaginative guess.
+
+Do not include your visual analysis in the JSON; return only the requested
+persona fields.
 
 Reply with JSON only, using exactly these keys:
 - "object": what the object is, in a few words
