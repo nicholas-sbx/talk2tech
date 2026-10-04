@@ -23,7 +23,8 @@ talks back, in character, about what it sees.
 ```
 
 The script creates `.venv`, installs dependencies (again only when `requirements.txt` changes),
-creates `.env` from `.env.example`, and starts the server with auto-reload. Options:
+creates `.env` from `.env.example`, and starts the server with auto-reload. To do only the setup
+without starting the server, run `.\setup.ps1` or `./setup.sh`. Options:
 
 | PowerShell | bash | what it does |
 |---|---|---|

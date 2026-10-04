@@ -17,25 +17,8 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+bash ./setup.sh
 if [[ -x .venv/Scripts/python.exe ]]; then PY=.venv/Scripts/python.exe; else PY=.venv/bin/python; fi
-if [[ ! -x "$PY" ]]; then
-  echo "Creating virtual environment..."
-  python3 -m venv .venv 2>/dev/null || python -m venv .venv
-  if [[ -x .venv/Scripts/python.exe ]]; then PY=.venv/Scripts/python.exe; else PY=.venv/bin/python; fi
-fi
-
-# Reinstall dependencies only when requirements.txt changes.
-HASH=$("$PY" -c "import hashlib;print(hashlib.sha256(open('requirements.txt','rb').read()).hexdigest())")
-if [[ "$(cat .venv/.requirements-hash 2>/dev/null)" != "$HASH" ]]; then
-  echo "Installing dependencies..."
-  "$PY" -m pip install -q --disable-pip-version-check -r requirements.txt
-  echo "$HASH" > .venv/.requirements-hash
-fi
-
-if [[ ! -f .env ]]; then
-  cp .env.example .env
-  echo "Created .env from .env.example. Add your API keys there (blank keys run in mock mode)."
-fi
 
 if command -v lsof >/dev/null && lsof -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
   echo "Port $PORT is already in use. Try: ./start.sh --port $((PORT + 1))"
