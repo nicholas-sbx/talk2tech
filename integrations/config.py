@@ -21,14 +21,16 @@ GEMINI_MODEL = _env("GEMINI_MODEL", "gemini-3.5-flash-lite")
 # Tried in order when the model before times out or is overloaded. Comma-separated, fastest first.
 GEMINI_FALLBACK_MODELS = [
     m.strip()
-    for m in _env("GEMINI_FALLBACK_MODELS", _env("GEMINI_FALLBACK_MODEL", "gemini-3.1-flash-lite,gemini-3.5-flash")).split(",")
+    for m in _env("GEMINI_FALLBACK_MODELS", _env("GEMINI_FALLBACK_MODEL", "gemini-3.1-flash-lite")).split(",")
     if m.strip()
 ]
 # Less thinking = faster replies. gemini-3.5-flash-lite supports minimal/low/medium/high.
 GEMINI_THINKING_LEVEL = _env("GEMINI_THINKING_LEVEL", "minimal")
-# Give up on a model that hasn't started answering within this many seconds, and skip it for a while.
-GEMINI_TIMEOUT_S = float(_env("GEMINI_TIMEOUT_S", "3"))
-GEMINI_COOLDOWN_S = float(_env("GEMINI_COOLDOWN_S", "60"))
+# If a model hasn't started answering after GEMINI_HEDGE_S, also send the prompt to the next one and
+# take whichever answers first, up to GEMINI_MAX_ATTEMPTS requests and GEMINI_GIVE_UP_S overall.
+GEMINI_HEDGE_S = float(_env("GEMINI_HEDGE_S", "1.5"))
+GEMINI_MAX_ATTEMPTS = int(_env("GEMINI_MAX_ATTEMPTS", "4"))
+GEMINI_GIVE_UP_S = float(_env("GEMINI_GIVE_UP_S", "12"))
 
 ELEVENLABS_API_KEY = _env("ELEVENLABS_API_KEY")
 ELEVENLABS_STT_MODEL = _env("ELEVENLABS_STT_MODEL", "scribe_v1")
