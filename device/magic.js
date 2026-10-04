@@ -21,10 +21,10 @@ const LAP_S = 3; // seconds per lap
 const TRAIL = 0.42; // how much of a lap is inked at once
 const GROW_S = 0.45; // how long it takes to draw out to full length
 const SAMPLES = 360; // points per lap
-const CURLS = 8.4; // per lap; not a whole number, so each lap curls in new places
-const CURL = 0.16; // curl radius, as a share of the loop's
-const TIP = 11; // the star on its tip, in CSS pixels
-const FLICK_EVERY = [3, 7]; // frames between sparkles flicked off the tip: at least, and under
+const CURLS = 6.5; // per lap; not a whole number, so each lap curls in new places
+const CURL = 0.24; // curl radius, as a share of the loop's
+const TIP = 15; // the star on its tip, in CSS pixels
+const FLICK_EVERY = [2, 6]; // frames between sparkles flicked off the tip: at least, and under
 const MAX_SPARKLES = 8;
 
 // Sparkles pop in and out a drawing at a time, one size per frame, and twinkle in between.
@@ -225,7 +225,8 @@ function trailPoints(trail, boil) {
     // Drawn by hand: the loop's never quite round, and its curls are never quite even.
     const wobble = 1 + 0.05 * Math.sin(a * 2 + spell.seed) + 0.03 * Math.sin(a * 5 + spell.seed * 1.7);
     const curl = trail.r * CURL * (1 + 0.2 * Math.sin(a * 3 + spell.seed * 2.3));
-    const c = a * CURLS + spell.seed;
+    // Curling against the way round puts the loops on the outside, framing the object.
+    const c = -a * CURLS + spell.seed;
     // Line boil: each point has its own wiggle per drawing, so the line shimmers rather than crawls.
     const x =
       trail.r * wobble * Math.cos(a) + curl * Math.cos(c) +
@@ -265,16 +266,16 @@ function flick([tipX, tipY], home, frame) {
   const out = 10 + Math.random() * 14;
   const x = tipX + (dx / d) * out + (Math.random() - 0.5) * 10;
   const y = tipY + (dy / d) * out + (Math.random() - 0.5) * 10;
-  const main = sparkle({ x, y, size: 7 + Math.random() * 6, born: frame });
+  const main = sparkle({ x, y, size: 10 + Math.random() * 7, born: frame });
   sparkles.push(main);
   const side = Math.random() < 0.5 ? -1 : 1;
   const extra = Math.random();
   if (extra < 0.35) {
     sparkles.push(sparkle({ x: x + side * main.size * 1.5, y: y - main.size * 1.2, size: main.size * 0.5, fill: main.fill, born: frame + 1 }));
   } else if (extra < 0.55) {
-    sparkles.push(sparkle({ kind: "dot", x: x - side * main.size * 1.3, y: y + main.size * 1.1, size: 2.6, born: frame + 1 }));
+    sparkles.push(sparkle({ kind: "dot", x: x - side * main.size * 1.3, y: y + main.size * 1.1, size: 3.2, born: frame + 1 }));
   } else if (extra < 0.68) {
-    sparkles.push(sparkle({ kind: "glint", x: x + side * main.size * 1.6, y: y + main.size * 0.6, size: 4.5, born: frame + 1 }));
+    sparkles.push(sparkle({ kind: "glint", x: x + side * main.size * 1.6, y: y + main.size * 0.6, size: 5.5, born: frame + 1 }));
   }
 }
 
@@ -289,7 +290,7 @@ function fling(at, frame) {
       y: Math.sin(a) * at.r * 1.15,
       vx: Math.cos(a) * at.r * 0.1,
       vy: Math.sin(a) * at.r * 0.1,
-      size: 8 + Math.random() * 5,
+      size: 11 + Math.random() * 6,
       born: frame,
       life: 7 + (i % 2) * 2,
     }));

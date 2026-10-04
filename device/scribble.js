@@ -585,8 +585,8 @@ export class ScribbleFace {
     for (let i = 0; i < 3; i++) {
       const shows = 1 + i * 3;
       if (step < shows || step >= THINK_BEATS - 2) continue;
-      const r = step === shows ? 7 : 5.5;
-      this.drawScribbleLoop(ctx, (i - 1) * 20, cy + 2, r, r, 6, 0.5, 50 + i * 7);
+      const r = step === shows ? 8.5 : 6.5;
+      this.drawScribbleLoop(ctx, (i - 1) * 22, cy + 2, r, r, 6, 0.5, 50 + i * 7);
       ctx.fill();
     }
   }
