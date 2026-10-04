@@ -334,17 +334,28 @@ function toBase64(blob) {
 
 // ---------- typed fallback ----------
 
-// On touch screens the text box only exists while focused: the keyboard button opens it,
-// losing focus hides it. With a mouse, the keyboard button just toggles it.
-const touchScreen = matchMedia("(pointer: coarse)").matches;
+// Opened with a tap, the text box only exists while focused: losing focus hides it.
+// Opened with a mouse (or keyboard), it stays until the keyboard button is clicked again.
+// Decided per press, so touchscreen laptops get whichever fits how you pressed it.
+const keyboardBtn = $("#keyboard");
+let keyboardPointer = "";
+let textSticky = false;
 
-$("#keyboard").addEventListener("click", () => {
-  textForm.hidden = !touchScreen && !textForm.hidden;
-  if (!textForm.hidden) textInput.focus();
+keyboardBtn.addEventListener("pointerdown", (e) => (keyboardPointer = e.pointerType));
+keyboardBtn.addEventListener("click", () => {
+  const tapped = keyboardPointer === "touch" || keyboardPointer === "pen";
+  keyboardPointer = "";
+  if (!tapped && textSticky && !textForm.hidden) {
+    textForm.hidden = true;
+    return;
+  }
+  textSticky = !tapped;
+  textForm.hidden = false;
+  textInput.focus();
 });
 
 textForm.addEventListener("focusout", (e) => {
-  if (touchScreen && !textForm.contains(e.relatedTarget)) textForm.hidden = true;
+  if (!textSticky && !textForm.contains(e.relatedTarget)) textForm.hidden = true;
 });
 
 // Keep focus in the input when tapping Send, so the form isn't hidden before the tap lands.
@@ -357,7 +368,7 @@ textForm.addEventListener("submit", (e) => {
   stopSpeech();
   send({ type: "text", text, image: grabFrame() });
   textInput.value = "";
-  if (touchScreen) textInput.blur(); // dismiss the on-screen keyboard
+  if (!textSticky) textInput.blur(); // dismiss the on-screen keyboard
 });
 
 // ---------- show text toggle (off by default, remembered per phone) ----------
