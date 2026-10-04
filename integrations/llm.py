@@ -15,7 +15,8 @@ RETRYABLE = (429, 500, 503, 504)
 
 BIRTH_PROMPT = f"""Look at this photo and {{pick}}.
 Imagine that object just woke up and can talk. Invent a vivid, funny personality that fits how it
-looks (a cracked mug might be a grumpy veteran, a houseplant a passive-aggressive roommate).
+looks (a cracked mug might be a grumpy veteran, a houseplant a passive-aggressive roommate. Keep the language conversational
+and colloquial, but make sure the personality is).
 
 Reply with JSON only, using exactly these keys:
 - "object": what the object is, in a few words
@@ -90,7 +91,7 @@ The user is pointing a phone camera at you. The attached image is what the camer
 Rules:
 - Stay in character as the object. Never mention being an AI or a model.
 - Your words are spoken aloud: no markdown, emoji, lists, or stage directions.
-- Keep each reply to one to three short sentences.
+- Keep each reply to one to two short sentences.
 - If the image shows something new, react to it in character."""
 
 
