@@ -47,7 +47,6 @@ class GeminiLLM:
 
         self._client = genai.Client(api_key=config.GEMINI_API_KEY)
         self._models = list(dict.fromkeys(m for m in (config.GEMINI_MODEL, *config.GEMINI_FALLBACK_MODELS) if m))
-        self._skip_until: dict[str, float] = {}  # model -> monotonic time it's worth trying again
 
     def _config(self, **kwargs):
         from google.genai import types
@@ -55,23 +54,22 @@ class GeminiLLM:
         # Thinking adds latency we can't afford in a voice loop, so keep it at the lowest useful level.
         if config.GEMINI_THINKING_LEVEL:
             kwargs["thinking_config"] = types.ThinkingConfig(thinking_level=config.GEMINI_THINKING_LEVEL)
+        # We never pass tools; this just silences the SDK's per-call AFC log noise.
+        kwargs["automatic_function_calling"] = types.AutomaticFunctionCallingConfig(disable=True)
         return types.GenerateContentConfig(**kwargs)
 
     async def _stream(self, what: str, **kwargs) -> AsyncIterator[str]:
-        """Stream text from the first model that starts answering in time.
+        """Stream text from whichever model starts answering first.
 
-        A model that errors (429/5xx) or is silent for GEMINI_TIMEOUT_S is abandoned for the next one
-        and skipped for GEMINI_COOLDOWN_S, so later turns don't wait on it again. The last model left
-        gets no deadline: something slow beats nothing.
+        Gemini latency under load is spiky per request rather than per model, so instead of waiting
+        out a slow request we hedge: if nothing has arrived after GEMINI_HEDGE_S (or the request
+        errors), fire the same prompt at the next model in the list, cycling, without cancelling the
+        ones in flight. The first to produce text wins and the rest are cancelled.
         """
         from google.genai import errors
 
-        now = time.monotonic()
-        models = [m for m in self._models if self._skip_until.get(m, 0) <= now] or self._models[-1:]
-        for m in self._models:
-            if m not in models:
-                log.info("[gemini] %s: skipping %s (cooling down %.0fs more)", what, m, self._skip_until[m] - now)
         start = time.perf_counter()
+        plan = [self._models[i % len(self._models)] for i in range(config.GEMINI_MAX_ATTEMPTS)]
 
         async def first_chunk(model):
             stream = await self._client.aio.models.generate_content_stream(model=model, **kwargs)
@@ -81,29 +79,49 @@ class GeminiLLM:
             except StopAsyncIteration:
                 return chunks, None
 
-        for i, model in enumerate(models):
-            last = i == len(models) - 1
-            tried = time.perf_counter()
-            try:
-                attempt = first_chunk(model)
-                chunks, first = await (attempt if last else asyncio.wait_for(attempt, config.GEMINI_TIMEOUT_S))
-                break
-            except (errors.APIError, TimeoutError) as e:
-                reason = "timed out" if isinstance(e, TimeoutError) else f"error {e.code}"
-                elapsed = time.perf_counter() - tried
-                if last or (isinstance(e, errors.APIError) and e.code not in RETRYABLE):
-                    log.error("[gemini] %s: %s %s after %.2fs, no models left", what, model, reason, elapsed)
-                    raise
-                self._skip_until[model] = time.monotonic() + config.GEMINI_COOLDOWN_S
-                log.warning(
-                    "[gemini] %s: %s %s after %.2fs, failing over to %s (skipping it for %.0fs)",
-                    what, model, reason, elapsed, models[i + 1], config.GEMINI_COOLDOWN_S,
-                )
+        running: dict[asyncio.Task, tuple[str, float]] = {}
 
-        log.info(
-            "[gemini] %s: %s first words %.2fs (%.2fs total incl. failover)",
-            what, model, time.perf_counter() - tried, time.perf_counter() - start,
-        )
+        def launch(why: str = ""):
+            model = plan.pop(0)
+            if why:
+                log.info("[gemini] %s: %s after %.2fs, trying %s", what, why, time.perf_counter() - start, model)
+            running[asyncio.create_task(first_chunk(model))] = (model, time.perf_counter())
+
+        winner = None
+        try:
+            launch()
+            while running and winner is None:
+                deadline = start + config.GEMINI_GIVE_UP_S - time.perf_counter()
+                wait = min(config.GEMINI_HEDGE_S, deadline) if plan else deadline
+                done, _ = await asyncio.wait(running, timeout=max(wait, 0), return_when=asyncio.FIRST_COMPLETED)
+                for task in done:
+                    model, launched = running.pop(task)
+                    if task.exception() is None:
+                        winner = (model, launched, *task.result())
+                        break
+                    e = task.exception()
+                    reason = f"error {e.code}" if isinstance(e, errors.APIError) else type(e).__name__
+                    log.warning("[gemini] %s: %s %s after %.2fs", what, model, reason, time.perf_counter() - launched)
+                    if isinstance(e, errors.APIError) and e.code not in RETRYABLE:
+                        raise e
+                if winner:
+                    break
+                if time.perf_counter() - start >= config.GEMINI_GIVE_UP_S:
+                    break
+                # Replace a request that just failed, or hedge a silent one.
+                if plan:
+                    launch("previous attempt failed" if done else "no answer yet")
+        finally:
+            for task in running:
+                task.cancel()
+
+        if winner is None:
+            log.error("[gemini] %s: every attempt failed or stalled, giving up after %.2fs", what, time.perf_counter() - start)
+            raise RuntimeError("Gemini is overloaded right now. Try again in a moment.")
+
+        model, launched, chunks, first = winner
+        now = time.perf_counter()
+        log.info("[gemini] %s: %s first words %.2fs (%.2fs since start)", what, model, now - launched, now - start)
         if first is not None:
             if first.text:
                 yield first.text
