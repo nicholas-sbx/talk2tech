@@ -1,10 +1,14 @@
 :root {
-  --bg: #0b0b0f;
-  --fg: #f5f5f7;
-  --muted: rgba(245, 245, 247, 0.65);
-  --glass: rgba(15, 15, 20, 0.55);
-  --accent: #7c5cff;
-  --hot: #ff4d6d;
+  --bg: #000;
+  --fg: #fff;
+  --muted: rgba(255, 255, 255, 0.75);
+  --surface: rgba(0, 0, 0, 0.45);
+  --record: #ff3b30;
+  --paper: #fafafa;
+  --ink: #0a0a0a;
+  --ink-muted: #6b6b6b;
+  --line: #e4e4e4;
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.5), 0 0 12px rgba(0, 0, 0, 0.45);
   --safe-top: env(safe-area-inset-top, 0px);
   --safe-bottom: env(safe-area-inset-bottom, 0px);
 }
@@ -16,7 +20,7 @@ html, body {
   height: 100%;
   background: var(--bg);
   color: var(--fg);
-  font: 16px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  font: 16px/1.4 "Geist", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   overflow: hidden;
   overscroll-behavior: none;
   user-select: none;
@@ -33,142 +37,148 @@ html, body {
 }
 
 button { font: inherit; color: inherit; cursor: pointer; }
+button:focus-visible { outline: 2px solid var(--fg); outline-offset: 2px; }
+
+/* ---------- camera view ---------- */
 
 .top {
   position: fixed;
   top: 0; left: 0; right: 0;
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 12px;
-  padding: calc(var(--safe-top) + 12px) 16px 24px;
-  background: linear-gradient(to bottom, rgba(0,0,0,0.7), transparent);
+  padding: calc(var(--safe-top) + 16px) 16px 32px;
+  background: linear-gradient(to bottom, rgba(0, 0, 0, 0.4), transparent);
+  text-shadow: var(--shadow);
 }
-.who { flex: 1; min-width: 0; }
-.name { font-size: 22px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.object { font-size: 14px; color: var(--muted); }
-
-.switch {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  height: 48px;
-  padding: 0 12px;
-  border-radius: 24px;
-  background: var(--glass);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
-  font-size: 14px;
-  cursor: pointer;
-}
-.switch input { position: absolute; opacity: 0; pointer-events: none; }
-.switch-track {
-  position: relative;
-  width: 40px; height: 24px;
-  border-radius: 12px;
-  background: rgba(255,255,255,0.3);
-  transition: background 0.2s;
-}
-.switch-thumb {
-  position: absolute;
-  top: 2px; left: 2px;
-  width: 20px; height: 20px;
-  border-radius: 50%;
-  background: #fff;
-  transition: transform 0.2s;
-}
-.switch input:checked + .switch-track { background: var(--accent); }
-.switch input:checked + .switch-track .switch-thumb { transform: translateX(16px); }
-.switch input:focus-visible + .switch-track { outline: 2px solid #fff; outline-offset: 2px; }
-
-/* Text is off by default; errors still show so failures aren't silent. */
-body:not(.show-text) .bubble.user,
-body:not(.show-text) .bubble.thing { display: none; }
+.who { flex: 1; min-width: 0; padding-top: 2px; }
+.name { font-size: 20px; font-weight: 600; letter-spacing: -0.01em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.object { font-size: 13px; color: var(--muted); }
 
 .icon-btn {
-  width: 48px; height: 48px;
+  width: 44px; height: 44px;
   flex: none;
+  display: grid;
+  place-items: center;
   border: 0;
   border-radius: 50%;
-  background: var(--glass);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
-  font-size: 22px;
+  background: var(--surface);
 }
-.spacer { visibility: hidden; }
-
-.captions {
-  max-height: 45vh;
-  margin-bottom: 16px;
-  text-align: left;
-  display: flex;
-  flex-direction: column;
-  justify-content: flex-end;
-  gap: 8px;
-  overflow: hidden;
-  pointer-events: none;
+.icon-btn svg {
+  width: 20px; height: 20px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.75;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
-.bubble {
-  max-width: 85%;
-  padding: 10px 14px;
-  border-radius: 18px;
-  background: var(--glass);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
-  animation: pop 0.2s ease-out;
-}
-.bubble.user { align-self: flex-end; background: rgba(124, 92, 255, 0.75); font-size: 15px; }
-.bubble.thing { align-self: flex-start; font-size: 18px; }
-.bubble.error { align-self: center; background: rgba(255, 77, 109, 0.8); font-size: 14px; }
-@keyframes pop { from { transform: translateY(6px); opacity: 0; } }
+.icon-btn[aria-pressed="true"] { background: var(--fg); color: var(--bg); }
 
 .bottom {
   position: fixed;
   left: 0; right: 0; bottom: 0;
-  padding: 32px 16px calc(var(--safe-bottom) + 16px);
-  background: linear-gradient(to top, rgba(0,0,0,0.75), transparent);
-  text-align: center;
+  padding: 48px 16px calc(var(--safe-bottom) + 20px);
+  background: linear-gradient(to top, rgba(0, 0, 0, 0.7) 40%, transparent);
 }
-.status { font-size: 14px; color: var(--muted); min-height: 20px; margin-bottom: 12px; }
-.controls { display: flex; align-items: center; justify-content: space-between; max-width: 360px; margin: 0 auto; }
 
+/* Captions read like subtitles: no boxes, just shadowed text over the camera. */
+.captions {
+  max-height: 45vh;
+  margin-bottom: 20px;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  gap: 10px;
+  overflow: hidden;
+  pointer-events: none;
+  text-shadow: var(--shadow);
+}
+.line { max-width: 34em; }
+.line.user { font-size: 16px; color: var(--muted); }
+.line.thing { font-size: 20px; font-weight: 500; line-height: 1.35; }
+.line.error {
+  align-self: flex-start;
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: var(--record);
+  font-size: 13px;
+  text-shadow: none;
+}
+.line:not(:nth-last-child(-n+2)) { opacity: 0.6; }
+
+/* Text is off by default; errors still show so failures aren't silent. */
+body:not(.show-text) .line.user,
+body:not(.show-text) .line.thing { display: none; }
+
+.status { font-size: 13px; color: var(--muted); min-height: 18px; margin-bottom: 14px; text-align: center; text-shadow: var(--shadow); }
+.controls { display: flex; align-items: center; justify-content: space-between; max-width: 320px; margin: 0 auto; }
+
+/* Shutter-style talk button: white ring, white core, red while recording. */
 .talk {
-  width: 88px; height: 88px;
+  width: 76px; height: 76px;
+  padding: 0;
   border-radius: 50%;
-  border: 4px solid rgba(255,255,255,0.9);
-  background: var(--accent);
+  border: 4px solid var(--fg);
+  background: transparent;
   display: grid;
   place-items: center;
   touch-action: none;
-  transition: transform 0.1s, background 0.15s;
 }
-.talk:disabled { opacity: 0.4; }
-.talk.recording { background: var(--hot); transform: scale(1.12); }
-.talk-dot { width: 24px; height: 24px; border-radius: 50%; background: #fff; }
-.talk.recording .talk-dot { animation: pulse 1s infinite; }
-@keyframes pulse { 50% { transform: scale(0.6); } }
+.talk-core {
+  width: 60px; height: 60px;
+  border-radius: 50%;
+  background: var(--fg);
+  transition: transform 0.15s, background 0.15s;
+}
+.talk:disabled { opacity: 0.35; }
+.talk.recording .talk-core { background: var(--record); transform: scale(0.85); }
 
-.text-form { display: flex; gap: 8px; max-width: 480px; margin: 14px auto 0; }
+.text-form { display: flex; gap: 8px; max-width: 480px; margin: 16px auto 0; }
 .text-form[hidden] { display: none; }
 .text-form input {
   flex: 1; min-width: 0;
   padding: 12px 14px;
-  border: 0; border-radius: 24px;
+  border: 0; border-radius: 12px;
   font: inherit; font-size: 16px; /* 16px stops iOS zooming on focus */
-  background: rgba(255,255,255,0.92); color: #111;
+  background: var(--paper); color: var(--ink);
 }
-.text-form button { border: 0; border-radius: 24px; padding: 0 18px; background: var(--accent); }
+.text-form input::placeholder { color: var(--ink-muted); }
+.text-form input:focus { outline: 2px solid var(--fg); outline-offset: 2px; }
+.text-form button { border: 0; border-radius: 12px; padding: 0 18px; font-weight: 500; background: var(--fg); color: var(--ink); }
 
-.mode { margin-top: 10px; font-size: 11px; color: var(--muted); }
+.mode { margin-top: 12px; font-size: 11px; color: var(--muted); text-align: center; }
+.mode[hidden] { display: none; }
+
+/* ---------- start screen ---------- */
 
 .start {
   position: fixed; inset: 0;
-  display: flex; flex-direction: column; align-items: center; justify-content: center;
-  gap: 8px; padding: 24px;
-  background: radial-gradient(circle at 50% 30%, #2a1f5c, var(--bg) 70%);
-  text-align: center;
+  display: flex; flex-direction: column;
+  padding: calc(var(--safe-top) + 20px) 24px calc(var(--safe-bottom) + 24px);
+  background: var(--paper);
+  color: var(--ink);
 }
 .start[hidden] { display: none; }
-.start h1 { font-size: 40px; margin: 0; }
-.start p { color: var(--muted); margin: 0 0 16px; max-width: 280px; }
-.start button { border: 0; border-radius: 28px; padding: 16px 48px; font-size: 18px; font-weight: 600; background: var(--accent); }
-.start-error { color: var(--hot) !important; font-size: 14px; }
+.wordmark { font-size: 16px; font-weight: 600; letter-spacing: -0.01em; }
+.start-body { flex: 1; display: flex; flex-direction: column; justify-content: center; max-width: 420px; }
+.start h1 { margin: 0 0 32px; font-size: 44px; font-weight: 600; line-height: 1.05; letter-spacing: -0.03em; }
+.steps { margin: 0; padding: 0; list-style: none; counter-reset: step; }
+.steps li {
+  counter-increment: step;
+  display: flex; gap: 16px;
+  padding: 14px 0;
+  border-top: 1px solid var(--line);
+  color: var(--ink-muted);
+}
+.steps li:last-child { border-bottom: 1px solid var(--line); }
+.steps li::before { content: counter(step); width: 1ch; color: var(--ink); font-weight: 500; font-variant-numeric: tabular-nums; }
+.start-foot { max-width: 420px; width: 100%; }
+.start button {
+  width: 100%;
+  padding: 16px;
+  border: 0; border-radius: 14px;
+  font-size: 16px; font-weight: 500;
+  background: var(--ink); color: var(--paper);
+}
+.start-error { margin: 0 0 12px; font-size: 13px; color: #d70015; }
+.start-error:empty { display: none; }
