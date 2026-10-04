@@ -81,18 +81,27 @@ button:focus-visible { outline: 2px solid var(--fg); outline-offset: 2px; }
   background: linear-gradient(to top, rgba(0, 0, 0, 0.7) 40%, transparent);
 }
 
-/* Captions read like subtitles: no boxes, just shadowed text over the camera. */
+/* Captions read like subtitles: no boxes, just shadowed text over the camera.
+   Scrollable for history, with the scrollbar hidden. */
 .captions {
   max-height: 45vh;
   margin-bottom: 20px;
   display: flex;
   flex-direction: column;
-  justify-content: flex-end;
   gap: 10px;
-  overflow: hidden;
-  pointer-events: none;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: none;
   text-shadow: var(--shadow);
 }
+.captions::-webkit-scrollbar { display: none; }
+/* Fade the top edge only when there's history scrolled out of view above it. */
+.captions.scrolled {
+  -webkit-mask-image: linear-gradient(to bottom, transparent, #000 32px);
+  mask-image: linear-gradient(to bottom, transparent, #000 32px);
+}
+/* Bottom-anchors short content; unlike justify-content: flex-end, it keeps overflow scrollable. */
+.captions > :first-child { margin-top: auto; }
 .line { max-width: 34em; }
 .line.user { font-size: 16px; color: var(--muted); }
 .line.thing { font-size: 20px; font-weight: 500; line-height: 1.35; }
