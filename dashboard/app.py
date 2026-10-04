@@ -13,7 +13,7 @@ import streamlit as st
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from integrations import config  # noqa: E402
 
-st.set_page_config(page_title="talk2tech dashboard", page_icon="🗣️", layout="wide")
+st.set_page_config(page_title="TalkTua dashboard", page_icon="🗣️", layout="wide")
 
 
 @st.cache_data(ttl=10)
@@ -26,7 +26,7 @@ def load_events() -> tuple[pd.DataFrame, str]:
 
 
 df, source = load_events()
-st.title("talk2tech")
+st.title("TalkTua")
 st.caption(f"Source: {source}")
 
 if df.empty:

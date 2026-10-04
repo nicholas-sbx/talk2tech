@@ -198,7 +198,7 @@ export async function startAR(audioContext) {
       XR8.Threejs.pipelineModule(),
       sceneModule(),
       {
-        name: "talk2tech-start",
+        name: "talktua-start",
         onStart: () => {
           running = true;
           resolve();
@@ -556,7 +556,7 @@ function median(values) {
 
 function captureModule() {
   return {
-    name: "talk2tech-capture",
+    name: "talktua-capture",
     onStart: ({ GLctx }) => {
       gl = GLctx;
     },
@@ -689,7 +689,7 @@ function fullWindowModule() {
     canvas.height = window.innerHeight;
   };
   return {
-    name: "talk2tech-fullwindow",
+    name: "talktua-fullwindow",
     onAttach: fill,
     // Wait a frame: the new window size lands after the orientation event.
     onDeviceOrientationChange: () => requestAnimationFrame(fill),
@@ -698,7 +698,7 @@ function fullWindowModule() {
 
 function sceneModule() {
   return {
-    name: "talk2tech-scene",
+    name: "talktua-scene",
     onStart: () => {
       const { scene, camera } = XR8.Threejs.xrScene();
       scene.add(makeSmiley());

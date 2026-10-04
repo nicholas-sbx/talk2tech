@@ -1,4 +1,4 @@
-# Launch the talk2tech backend (which also serves the mobile client).
+# Launch the TalkTua backend (which also serves the mobile client).
 # Usage:  .\start.ps1 [-Port 8000] [-Mock] [-Tunnel]
 #   -Mock    run every service in mock mode (no API keys needed)
 #   -Tunnel  also open an HTTPS tunnel with cloudflared so a phone can use the camera and mic
@@ -27,5 +27,5 @@ if ($Tunnel) {
     Start-Process cloudflared -ArgumentList "tunnel", "--url", "http://localhost:$Port"
 }
 
-Write-Host "talk2tech running at http://localhost:$Port"
+Write-Host "TalkTua running at http://localhost:$Port"
 & $python -m uvicorn backend.main:app --host 0.0.0.0 --port $Port --reload

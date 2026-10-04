@@ -1,4 +1,4 @@
-// talk2tech device client: camera + push-to-talk mic -> backend WebSocket -> spoken replies.
+// TalkTua device client: camera + push-to-talk mic -> backend WebSocket -> spoken replies.
 // Message formats: docs/protocol.md
 
 import { arSupported, requestMotionPermission, startAR, captureFrame, placeBox, clearMarker, inAR, setSpeaking, setThinking, faceOnScreen, onDeath, onScream, onSlap, triggerSlap, playOwSound, setFaceScale, DEFAULT_FACE_SCALE, setDistanceCompensation, DEFAULT_DISTANCE_COMPENSATION } from "./ar.js";
