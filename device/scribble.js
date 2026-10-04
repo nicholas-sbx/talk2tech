@@ -1,7 +1,8 @@
 // The talking face's look and sound, taken from the feature/ar branch (Cody Nguyen): a hand-drawn
-// scribble face with 12 FPS line boil and ~6.5 Hz lip-sync, which panics and screams (450 Hz ->
-// 1500 Hz) as it nears the edge of the screen and dies cartoonishly (slide whistle, splat, X_X) if
-// it's lost off it. ar.js draws it onto a texture stuck flat on the object.
+// scribble face with 12 FPS line boil and a mouth that opens with the voice's loudness (or flaps
+// at ~6.5 Hz without it), which panics and screams (450 Hz -> 1500 Hz) as it nears the edge of the
+// screen and dies cartoonishly (slide whistle, splat, X_X) if it's lost off it. ar.js draws it
+// onto a texture stuck flat on the object.
 
 
 // =========================================================================
@@ -348,6 +349,7 @@ export class ScribbleFace {
     this.panic = 0; // 0.0 to 1.0
     this.speaking = false;
     this.lipSyncPhase = 0;
+    this.mouthLevel = null; // 0-1 from the voice's loudness; null flaps the mouth on its own
     this.isDead = false;
     this.gazeDirection = { x: 0, y: 0 }; // Looking direction
 
@@ -499,8 +501,8 @@ export class ScribbleFace {
     // 2. Looking pupils
     // When panicking, pupils pinpoint / shrink and dart frantically
     const pupilRadius = Math.max(3.0, (7.0 - this.panic * 4.0));
-    let pupilOffsetX = this.gazeDirection.x * 6;
-    let pupilOffsetY = this.gazeDirection.y * 6;
+    let pupilOffsetX = this.gazeDirection.x * 8;
+    let pupilOffsetY = this.gazeDirection.y * 8;
 
     if (this.panic > 0.2) {
       // Frantic darting
@@ -537,8 +539,8 @@ export class ScribbleFace {
       this.drawScribbleLoop(ctx, 0, mouthY + mouthH * 0.45, mouthW * 0.45, mouthH * 0.35, 6, 1.5, 19);
       ctx.fill();
     } else if (this.speaking) {
-      // Reactive lip-sync flapping during spoken reply (~6.5 Hz)
-      const flap = 0.5 + 0.5 * Math.sin(this.lipSyncPhase);
+      // Opens as wide as the voice is loud, or flaps at ~6.5 Hz when there's no audio to follow
+      const flap = this.mouthLevel ?? 0.5 + 0.5 * Math.sin(this.lipSyncPhase);
       const mouthW = 18 + flap * 6;
       const mouthH = 5 + flap * 14;
 

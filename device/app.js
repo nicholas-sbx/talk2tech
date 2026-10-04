@@ -48,6 +48,7 @@ let frameCounter = 0;
 let smileySize; // the current object's smiley diameter, as a share of its width (Gemini's choice)
 const debugFrames = new Map();
 let audioCtx = null;
+let voice = null; // replies play through this analyser, so the AR face's mouth can follow them
 let playChain = Promise.resolve();
 let playGen = 0; // bumped on interrupt so queued audio is dropped
 let pendingSpeech = 0;
@@ -64,6 +65,9 @@ $("#start-btn").addEventListener("click", async () => {
   const motion = arAvailable ? requestMotionPermission() : null;
   audioCtx = new (window.AudioContext || window.webkitAudioContext)();
   await audioCtx.resume();
+  voice = audioCtx.createAnalyser();
+  voice.fftSize = 1024;
+  voice.connect(audioCtx.destination);
   // Safari keeps the audio session type across reloads; a leftover "playback" blocks the mic.
   setAudioSession("auto");
   if (arAvailable) return startWithAR(motion);
@@ -331,8 +335,8 @@ function getMic() {
         return navigator.mediaDevices.getUserMedia({ audio: AUDIO });
       })
       .then((stream) => {
-        // A reply started playing while we were opening: don't hold the mic over it.
-        if (speaking() && !recorder && !held) {
+        // A reply (or scream) started playing while we were opening: don't hold the mic over it.
+        if (outLoud() && !recorder && !held) {
           stream.getTracks().forEach((t) => t.stop());
           setAudioSession("playback");
           return null;
@@ -357,7 +361,7 @@ function scheduleMicReopen() {
   clearTimeout(micReopen);
   if (!micAllowed) return;
   micReopen = setTimeout(() => {
-    if (!speaking()) getMic().catch((err) => console.warn(err));
+    if (!outLoud()) getMic().catch((err) => console.warn(err));
   }, MIC_REOPEN_MS);
 }
 
@@ -492,18 +496,21 @@ onDeath(() => {
   send({ type: "interrupt" });
 });
 
-// While the AR face screams, the sentence it's on pauses, then picks up where it left off.
+// While the AR face screams, the sentence it's on pauses, then picks up where it left off. The mic
+// closes for the scream too (unless you're talking), or iOS plays it as quietly as a phone call.
 onScream((on) => {
   screaming = on;
   if (on) {
     current?.pause();
     setSpeaking(false);
+    releaseMic();
   } else {
     if (current) {
       current.resume();
-      setSpeaking(true);
+      setSpeaking(true, current.voice);
     }
     calmWaiters.splice(0).forEach((resolve) => resolve());
+    scheduleMicReopen();
   }
 });
 
@@ -522,6 +529,11 @@ function speaking() {
   return pendingSpeech > 0;
 }
 
+// Something's playing that an open mic would muffle.
+function outLoud() {
+  return speaking() || screaming;
+}
+
 function enqueueSpeech(text, audioB64) {
   const gen = playGen;
   pendingSpeech++;
@@ -536,7 +548,7 @@ function enqueueSpeech(text, audioB64) {
     if (gen !== playGen) return;
     await untilCalm();
     if (gen !== playGen) return;
-    setSpeaking(true);
+    setSpeaking(true, buffer ? voice : null);
     await (buffer ? playBuffer(buffer) : speakLocally(text));
   }).finally(() => {
     if (gen !== playGen) return;
@@ -558,7 +570,7 @@ function playBuffer(buffer) {
     const play = () => {
       const s = audioCtx.createBufferSource();
       s.buffer = buffer;
-      s.connect(audioCtx.destination);
+      s.connect(voice);
       s.onended = () => s === src && finish();
       src = s;
       startedAt = audioCtx.currentTime;
@@ -570,6 +582,7 @@ function playBuffer(buffer) {
       try { s?.stop(); } catch {}
     };
     const player = {
+      voice,
       pause: () => {
         if (!src) return;
         offset += audioCtx.currentTime - startedAt;
@@ -595,6 +608,7 @@ function speakLocally(text) {
   if (!window.speechSynthesis) return Promise.resolve();
   return new Promise((resolve) => {
     const player = {
+      voice: null,
       pause: () => speechSynthesis.pause(),
       resume: () => speechSynthesis.resume(),
       stop: () => {
