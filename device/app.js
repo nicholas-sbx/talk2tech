@@ -1,7 +1,7 @@
 // talk2tech device client: camera + push-to-talk mic -> backend WebSocket -> spoken replies.
 // Message formats: docs/protocol.md
 
-import { arSupported, requestMotionPermission, startAR, captureFrame, placeBox, clearMarker, inAR, setSpeaking, onDeath } from "./ar.js";
+import { arSupported, requestMotionPermission, startAR, captureFrame, placeBox, clearMarker, inAR, setSpeaking, onDeath, onScream } from "./ar.js";
 
 const $ = (sel) => document.querySelector(sel);
 const video = $("#cam");
@@ -51,7 +51,9 @@ let audioCtx = null;
 let playChain = Promise.resolve();
 let playGen = 0; // bumped on interrupt so queued audio is dropped
 let pendingSpeech = 0;
-let currentSource = null;
+let current = null; // the sentence playing now: { pause, resume, stop }
+let screaming = false; // the AR face is screaming: speech waits until it stops
+let calmWaiters = [];
 let thingLine = null;
 
 // ---------- startup ----------
@@ -487,6 +489,25 @@ onDeath(() => {
   send({ type: "interrupt" });
 });
 
+// While the AR face screams, the sentence it's on pauses, then picks up where it left off.
+onScream((on) => {
+  screaming = on;
+  if (on) {
+    current?.pause();
+    setSpeaking(false);
+  } else {
+    if (current) {
+      current.resume();
+      setSpeaking(true);
+    }
+    calmWaiters.splice(0).forEach((resolve) => resolve());
+  }
+});
+
+function untilCalm() {
+  return screaming ? new Promise((resolve) => calmWaiters.push(resolve)) : Promise.resolve();
+}
+
 $("#reset").addEventListener("click", () => {
   stopSpeech();
   send({ type: "reset" });
@@ -510,6 +531,8 @@ function enqueueSpeech(text, audioB64) {
     if (gen !== playGen) return;
     const buffer = await decoded;
     if (gen !== playGen) return;
+    await untilCalm();
+    if (gen !== playGen) return;
     setSpeaking(true);
     await (buffer ? playBuffer(buffer) : speakLocally(text));
   }).finally(() => {
@@ -522,18 +545,45 @@ function enqueueSpeech(text, audioB64) {
   });
 }
 
+// A buffer source can't pause, so pausing stops it and resuming starts a new one where it got to.
 function playBuffer(buffer) {
   if (audioCtx.state !== "running") audioCtx.resume();
   return new Promise((resolve) => {
-    const src = audioCtx.createBufferSource();
-    src.buffer = buffer;
-    src.connect(audioCtx.destination);
-    src.onended = () => {
-      if (currentSource === src) currentSource = null;
+    let src = null;
+    let offset = 0; // seconds played before the last pause
+    let startedAt = 0;
+    const play = () => {
+      const s = audioCtx.createBufferSource();
+      s.buffer = buffer;
+      s.connect(audioCtx.destination);
+      s.onended = () => s === src && finish();
+      src = s;
+      startedAt = audioCtx.currentTime;
+      s.start(0, offset);
+    };
+    const halt = () => {
+      const s = src;
+      src = null; // first, so its onended doesn't count as the sentence finishing
+      try { s?.stop(); } catch {}
+    };
+    const player = {
+      pause: () => {
+        if (!src) return;
+        offset += audioCtx.currentTime - startedAt;
+        halt();
+      },
+      resume: () => src || play(),
+      stop: () => {
+        halt();
+        finish();
+      },
+    };
+    const finish = () => {
+      if (current === player) current = null;
       resolve();
     };
-    currentSource = src;
-    src.start();
+    current = player;
+    play();
   });
 }
 
@@ -541,8 +591,21 @@ function playBuffer(buffer) {
 function speakLocally(text) {
   if (!window.speechSynthesis) return Promise.resolve();
   return new Promise((resolve) => {
+    const player = {
+      pause: () => speechSynthesis.pause(),
+      resume: () => speechSynthesis.resume(),
+      stop: () => {
+        speechSynthesis.cancel();
+        finish();
+      },
+    };
+    const finish = () => {
+      if (current === player) current = null;
+      resolve();
+    };
     const u = new SpeechSynthesisUtterance(text);
-    u.onend = u.onerror = resolve;
+    u.onend = u.onerror = finish;
+    current = player;
     speechSynthesis.speak(u);
   });
 }
@@ -553,11 +616,9 @@ function stopSpeech() {
   playChain = Promise.resolve();
   setSpeaking(false);
   scheduleMicReopen();
-  if (currentSource) {
-    try { currentSource.stop(); } catch {}
-    currentSource = null;
-  }
+  current?.stop();
   window.speechSynthesis?.cancel();
+  calmWaiters.splice(0).forEach((resolve) => resolve()); // they see the new playGen and drop out
 }
 
 function base64ToBuffer(b64) {

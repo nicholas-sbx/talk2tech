@@ -35,6 +35,9 @@ const FACE_UNITS = 110;
 const FACE_PLANE = 2.4;
 const FACE_PIXELS = 512;
 const OFFSCREEN_MARGIN = 0.05; // how far past the screen's edge (share of the screen) counts as lost
+// The scream counts as over once the face has been calm this long, so hovering at the edge of the
+// panic zone doesn't stutter the speech it pauses.
+const SCREAM_HOLD_MS = 300;
 const FOLLOW = 0.15; // per-frame easing toward a new placement, so re-locating doesn't jump
 const MIN_PLANE_HITS = 4; // fewer hits than this can't give a trustworthy surface angle
 const MAX_PLANE_ROUGHNESS = 0.2; // reject fits whose points stray from the plane by more than this share of their spread
@@ -70,6 +73,9 @@ let smiley, faceCanvas, faceTexture;
 const face = new ScribbleFace();
 let audio = null;
 let deathListener = null;
+let screamListener = null;
+let screaming = false;
+let lastScream = 0;
 
 // Camera pose, projection and 3D points for each frame we sent, so a box that arrives seconds
 // later still maps onto the world the way it was when the photo was taken.
@@ -280,6 +286,18 @@ export function onDeath(callback) {
   deathListener = callback;
 }
 
+// Calls back with true when the face starts screaming and false when it stops, so speech can
+// pause for it.
+export function onScream(callback) {
+  screamListener = callback;
+}
+
+function setScreaming(on) {
+  if (on === screaming) return;
+  screaming = on;
+  screamListener?.(on);
+}
+
 // Flaps the face's mouth while a reply plays.
 export function setSpeaking(on) {
   face.speaking = Boolean(on);
@@ -290,6 +308,7 @@ function revive() {
   face.isDead = false;
   face.panic = 0;
   audio?.reset();
+  setScreaming(false);
 }
 
 // Turns the placement into the smiley's pose: its back flat on the surface, its face along the
@@ -621,7 +640,7 @@ function animateMarker(time, camera) {
     size += (placement.size - size) * FOLLOW;
   }
   smiley.scale.setScalar(size);
-  feelTheEdges(camera);
+  feelTheEdges(camera, time);
   const ctx = faceCanvas.getContext("2d");
   ctx.clearRect(0, 0, FACE_PIXELS, FACE_PIXELS);
   face.draw(ctx, FACE_PIXELS / 2, FACE_PIXELS / 2, FACE_PIXELS / (FACE_UNITS * FACE_PLANE), time);
@@ -630,7 +649,7 @@ function animateMarker(time, camera) {
 
 // Where the face is on screen: near an edge it panics, looks at that edge and screams; past it (or
 // behind the camera) it dies.
-function feelTheEdges(camera) {
+function feelTheEdges(camera, time) {
   if (face.isDead) return;
   camera.updateMatrixWorld();
   const behind = smiley.position.clone().applyMatrix4(camera.matrixWorldInverse).z >= 0;
@@ -641,10 +660,17 @@ function feelTheEdges(camera) {
     face.isDead = true;
     audio?.triggerDeathSequence();
     deathListener?.();
+    setScreaming(false);
     return;
   }
   face.panic = EdgeFearSystem.computePanic(EdgeFearSystem.computeEdgeDistances(u, v).d);
   const gaze = { left: { x: -1, y: 0 }, right: { x: 1, y: 0 }, top: { x: 0, y: -1 }, bottom: { x: 0, y: 1 } };
   face.gazeDirection = gaze[EdgeFearSystem.getNearestEdge(u, v)];
   audio?.updatePanic(face.panic);
+  if (face.panic > 0) {
+    lastScream = time;
+    setScreaming(true);
+  } else if (time - lastScream > SCREAM_HOLD_MS) {
+    setScreaming(false);
+  }
 }
