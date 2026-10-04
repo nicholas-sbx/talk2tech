@@ -19,6 +19,12 @@ const CUBE_MIN = 0.03;
 const CUBE_MAX = 0.6;
 const PULSE_HZ = 1.5;
 const FOLLOW = 0.15; // per-frame easing toward a new placement, so re-locating doesn't jump
+const DEBUG = new URLSearchParams(location.search).has("debug");
+const CAMERA_FAILURES = {
+  DENY_CAMERA: "Camera access was blocked.",
+  NO_CAMERA: "No camera found.",
+  DENY_MICROPHONE: "Microphone access was blocked.",
+};
 
 let THREE = null;
 let XR8 = null;
@@ -84,6 +90,8 @@ export async function startAR() {
 
   canvas = document.createElement("canvas");
   canvas.id = "ar-canvas";
+  // Must be in the page before the camera starts: the engine puts its video element next to it.
+  document.body.append(canvas);
   XR8.XrController.configure({ disableWorldTracking: false });
 
   await new Promise((resolve, reject) => {
@@ -100,13 +108,15 @@ export async function startAR() {
           running = true;
           resolve();
         },
-        onCameraStatusChange: ({ status }) => {
-          if (status === "failed") reject(new Error("Camera access was blocked."));
+        // "failed" covers any error while starting the camera, not just a denied permission.
+        onCameraStatusChange: ({ status, reason }) => {
+          if (status === "failed") reject(new Error(CAMERA_FAILURES[reason] || `The AR camera didn't start (${reason}).`));
         },
         onException: (err) => (running ? console.warn("[AR]", err) : reject(err)),
       },
     ]);
-    XR8.run({ canvas, webgl2: true }); // current three.js is WebGL 2 only
+    // Current three.js is WebGL 2 only. ?debug turns on the engine's own logging.
+    XR8.run({ canvas, webgl2: true, verbose: DEBUG });
   }).catch((err) => {
     XR8.stop();
     XR8.clearCameraPipelineModules();
