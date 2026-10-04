@@ -1,7 +1,7 @@
 // talk2tech device client: camera + push-to-talk mic -> backend WebSocket -> spoken replies.
 // Message formats: docs/protocol.md
 
-import { arSupported, requestMotionPermission, startAR, captureFrame, placeBox, clearMarker, inAR, setSpeaking, onDeath, onScream, onSlap, triggerSlap } from "./ar.js";
+import { arSupported, requestMotionPermission, startAR, captureFrame, placeBox, clearMarker, inAR, setSpeaking, onDeath, onScream, onSlap, triggerSlap, playOwSound } from "./ar.js";
 
 const $ = (sel) => document.querySelector(sel);
 const video = $("#cam");
@@ -511,37 +511,117 @@ function untilCalm() {
 // Progressive anger state for physical force / slap interactions
 let angerLevel = 0;
 let lastSlapTimestamp = 0;
+let isInterjecting = false;
 const ANGER_DECAY_MS = 15000;
 const SLAP_TRIGGER_DEBOUNCE_MS = 1000;
 
-function handleSlap() {
+function speakInterjection(text) {
+  if (!window.speechSynthesis) return new Promise((r) => setTimeout(r, 650));
+  return new Promise((resolve) => {
+    let finished = false;
+    const done = () => {
+      if (!finished) {
+        finished = true;
+        resolve();
+      }
+    };
+    const u = new SpeechSynthesisUtterance(text);
+    u.rate = 1.15;
+    u.pitch = 1.1;
+    u.onend = done;
+    u.onerror = done;
+    setTimeout(done, 1200);
+    try {
+      speechSynthesis.speak(u);
+    } catch {
+      done();
+    }
+  });
+}
+
+async function handleSlap() {
   const now = performance.now();
-  if (now - lastSlapTimestamp < SLAP_TRIGGER_DEBOUNCE_MS) return;
+  if (now - lastSlapTimestamp < SLAP_TRIGGER_DEBOUNCE_MS || isInterjecting) return;
   if (now - lastSlapTimestamp > ANGER_DECAY_MS) {
     angerLevel = 0;
   }
   angerLevel = Math.min(3, angerLevel + 1);
   lastSlapTimestamp = now;
 
-  stopSpeech();
   triggerSlap(angerLevel);
 
-  const slapDescriptions = {
-    1: "*slaps object*",
-    2: "*slaps object again*",
-    3: "*slaps object repeatedly*",
-  };
-  thingLine = null;
-  line("user", slapDescriptions[angerLevel] || "*slaps object*");
+  const isCurrentlySpeaking = speaking();
+  const willResume = isCurrentlySpeaking && angerLevel < 3;
 
-  grabFrame().then((frame) => {
-    send({
-      type: "slap",
-      anger_level: angerLevel,
-      image: frame.image,
-      frame_id: frame.frameId,
+  if (willResume) {
+    isInterjecting = true;
+    const paused = current;
+    paused?.pause();
+    setSpeaking(false);
+
+    // Instant cartoon vocal "Ow!" sound
+    playOwSound();
+
+    const phrases = {
+      1: "Ow! Anyways...",
+      2: "Ouch! Stop that! As I was saying...",
+    };
+    const interjection = phrases[angerLevel] || "Ow! Anyways...";
+
+    // Append interjection in captions without dropping the line
+    if (thingLine) {
+      followCaptions(() => {
+        thingLine.textContent = (thingLine.textContent + " [" + interjection + "]").trim();
+      });
+    }
+
+    // Let the interjection phrase be spoken
+    if (!window.speechSynthesis?.paused) {
+      setSpeaking(true);
+      await speakInterjection(interjection);
+    } else {
+      await new Promise((r) => setTimeout(r, 450));
+    }
+
+    // Resume previous dialogue right where it ended off!
+    if (paused) {
+      paused.resume();
+      setSpeaking(true);
+    }
+    isInterjecting = false;
+
+    // Send slap message with resume=true so the server re-anchors the AR box without killing the turn
+    grabFrame().then((frame) => {
+      send({
+        type: "slap",
+        anger_level: angerLevel,
+        resume: true,
+        image: frame.image,
+        frame_id: frame.frameId,
+      });
     });
-  });
+  } else {
+    // Hit many times (angerLevel >= 3) OR was idle:
+    stopSpeech();
+
+    const slapDescriptions = {
+      1: "*slaps object*",
+      2: "*slaps object again*",
+      3: "*slaps object repeatedly*",
+    };
+    thingLine = null;
+    line("user", slapDescriptions[angerLevel] || "*slaps object*");
+
+    grabFrame().then((frame) => {
+      send({
+        type: "slap",
+        anger_level: angerLevel,
+        resume: false,
+        image: frame.image,
+        frame_id: frame.frameId,
+      });
+    });
+  }
 }
 
 onSlap(() => handleSlap());

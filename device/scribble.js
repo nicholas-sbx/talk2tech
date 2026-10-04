@@ -361,6 +361,39 @@ export class ProceduralAudio {
     } catch (e) {}
   }
 
+  /**
+   * Cartoon vocal "Ow!" pain exclamation sound
+   */
+  playOwSound() {
+    if (!this.ensureContext()) return;
+    const now = this.ctx.currentTime;
+
+    const osc = this.ctx.createOscillator();
+    const gain = this.ctx.createGain();
+    const filter = this.ctx.createBiquadFilter();
+
+    osc.type = "sawtooth";
+    osc.frequency.setValueAtTime(340, now);
+    osc.frequency.exponentialRampToValueAtTime(180, now + 0.28);
+
+    filter.type = "bandpass";
+    filter.frequency.setValueAtTime(950, now);
+    filter.frequency.exponentialRampToValueAtTime(500, now + 0.28);
+    filter.Q.setValueAtTime(2.2, now);
+
+    gain.gain.setValueAtTime(0.45, now);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.3);
+
+    osc.connect(filter);
+    filter.connect(gain);
+    gain.connect(this.masterGain || this.ctx.destination);
+
+    try {
+      osc.start(now);
+      osc.stop(now + 0.32);
+    } catch (e) {}
+  }
+
   reset() {
     if (this.deathTimer) {
       clearTimeout(this.deathTimer);
