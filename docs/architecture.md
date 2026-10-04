@@ -50,6 +50,6 @@ In mock voice mode the device speaks replies with the browser's built-in speech 
 
 1. ✅ Frame + push-to-talk → Gemini → spoken reply
 2. ✅ Personas with preset voices
-3. Unique voice per object via ElevenLabs voice design
+3. ✅ Unique voice per object via ElevenLabs voice design, with Eleven v4 audio tags in replies
 4. Memory that recognizes an object again (image embeddings) and recalls past chats
 5. Dashboard polish

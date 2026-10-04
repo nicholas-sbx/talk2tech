@@ -34,8 +34,14 @@ GEMINI_GIVE_UP_S = float(_env("GEMINI_GIVE_UP_S", "12"))
 
 ELEVENLABS_API_KEY = _env("ELEVENLABS_API_KEY")
 ELEVENLABS_STT_MODEL = _env("ELEVENLABS_STT_MODEL", "scribe_v1")
-ELEVENLABS_TTS_MODEL = _env("ELEVENLABS_TTS_MODEL", "eleven_flash_v2_5")
+# Eleven v3/v4 act out inline audio tags like [laughs] or [whispers]; older models would read them aloud.
+ELEVENLABS_TTS_MODEL = _env("ELEVENLABS_TTS_MODEL", "eleven_v4")
 ELEVENLABS_DEFAULT_VOICE_ID = _env("ELEVENLABS_DEFAULT_VOICE_ID", "21m00Tcm4TlvDq8ikWAM")
+# Each new object gets a voice designed from Gemini's description of it. Set to 0 to use the presets.
+ELEVENLABS_VOICE_DESIGN = _env("ELEVENLABS_VOICE_DESIGN", "1") == "1"
+ELEVENLABS_VOICE_DESIGN_MODEL = _env("ELEVENLABS_VOICE_DESIGN_MODEL", "eleven_ttv_v3")
+# Past this, the object wakes up with its preset voice instead of waiting on the design.
+ELEVENLABS_VOICE_DESIGN_TIMEOUT_S = float(_env("ELEVENLABS_VOICE_DESIGN_TIMEOUT_S", "20"))
 
 LOCAL_EVENTS_PATH = ROOT / "data" / "events.jsonl"
 

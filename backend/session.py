@@ -14,6 +14,7 @@ import uuid
 from fastapi import WebSocket, WebSocketDisconnect
 
 from backend.sentences import clean_for_speech, pop_sentences
+from integrations import config
 from integrations.voices import voice_id_for
 
 log = logging.getLogger(__name__)
@@ -36,6 +37,7 @@ class Session:
         self.memory = memory
         self.persona: dict | None = None
         self.voice_id: str | None = None
+        self._designed_voice: str | None = None  # voice_id, if it was made just for this object
         self.history: list[dict] = []
         self._turn: asyncio.Task | None = None
         # Persona generation started early, from the frame sent when the talk button is pressed.
@@ -45,6 +47,7 @@ class Session:
         self._locating: asyncio.Task | None = None
         self._turn_start = 0.0
         self._send_lock = asyncio.Lock()
+        self._cleanup: set[asyncio.Task] = set()  # designed voices being deleted
 
     async def send(self, msg: dict) -> None:
         async with self._send_lock:
@@ -89,7 +92,7 @@ class Session:
                     self._cancel_turn()
                     self._cancel_waking()
                     self._cancel_locating()
-                    self.persona, self.voice_id, self.history = None, None, []
+                    self._forget_object()
                     await self.send({"type": "reset"})
         except WebSocketDisconnect:
             pass
@@ -97,20 +100,61 @@ class Session:
             self._cancel_turn()
             self._cancel_waking()
             self._cancel_locating()
+            self._forget_object()
 
     def _start_waking(
         self, image: bytes | None, frame_id: str | None, focus: str | None = None, user_text: str | None = None
     ) -> None:
-        """Begin generating the persona while the user is still talking."""
+        """Begin generating the persona and its voice while the user is still talking."""
         if self.persona is None and self._waking is None:
-            self._waking = asyncio.create_task(self.llm.make_persona(image, focus, user_text))
+            self._waking = asyncio.create_task(self._wake(image, focus, user_text))
             self._waking_frame = frame_id if image else None
+
+    async def _wake(
+        self, image: bytes | None, focus: str | None, user_text: str | None
+    ) -> tuple[dict, str | None]:
+        """The new object's persona, and the voice ElevenLabs designed for it (None to use the preset)."""
+        persona = await self.llm.make_persona(image, focus, user_text, audio_tags=self.voice.supports_tags)
+        start = time.perf_counter()
+        design = asyncio.create_task(self.voice.design_voice(persona["name"], persona["voice_description"]))
+        try:
+            done, _ = await asyncio.wait({design}, timeout=config.ELEVENLABS_VOICE_DESIGN_TIMEOUT_S)
+        except asyncio.CancelledError:
+            design.add_done_callback(self._delete_designed)
+            raise
+        if not done:
+            log.warning("voice design took over %.0fs: using the preset voice", time.perf_counter() - start)
+            design.add_done_callback(self._delete_designed)
+            return persona, None
+        voice_id = design.result()
+        if voice_id:
+            log.info("[timing] voice designed in %.2fs", time.perf_counter() - start)
+        return persona, voice_id
 
     def _cancel_waking(self) -> None:
         if self._waking:
             self._waking.cancel()
+            # Cancelling does nothing if it already finished, so delete the voice it designed.
+            self._waking.add_done_callback(self._delete_designed)
             self._waking = None
         self._waking_frame = None
+
+    def _delete_designed(self, task: asyncio.Task) -> None:
+        """Done-callback for a task whose designed voice nobody will use."""
+        if task.cancelled() or task.exception() is not None:
+            return
+        result = task.result()
+        self._delete_voice(result[1] if isinstance(result, tuple) else result)
+
+    def _delete_voice(self, voice_id: str | None) -> None:
+        if voice_id:
+            task = asyncio.create_task(self.voice.delete_voice(voice_id))
+            self._cleanup.add(task)
+            task.add_done_callback(self._cleanup.discard)
+
+    def _forget_object(self) -> None:
+        self._delete_voice(self._designed_voice)
+        self.persona, self.voice_id, self._designed_voice, self.history = None, None, None, []
 
     def _start_locating(self, image: bytes, frame_id: str | None, user_text: str) -> None:
         """Find the object in this turn's frame, alongside the reply (or switch to another one)."""
@@ -141,7 +185,7 @@ class Session:
     def _switch_to(self, focus: str, user_text: str, image: bytes, frame_id: str | None) -> None:
         """Drop the current object and wake up the one the user asked for, answering what they said."""
         self._cancel_waking()
-        self.persona, self.voice_id, self.history = None, None, []
+        self._forget_object()
         self._start_turn(self._respond(user_text, image, frame_id, focus=focus, echo=False))
 
     def _start_turn(self, coro) -> None:
@@ -209,23 +253,25 @@ class Session:
         pending_tts: list[asyncio.Task] = []
 
         reply: list[str] = []
+        tags = self.voice.supports_tags
 
         def say(sentence: str, record: bool = True) -> None:
-            sentence = clean_for_speech(sentence)
-            if not sentence:
+            # Audio tags like [laughs] go to the voice to act out, but not into the captions.
+            spoken = clean_for_speech(sentence, keep_tags=tags)
+            if not spoken:
                 return
             if record:
-                reply.append(sentence)
-            task = asyncio.create_task(self.voice.synthesize(sentence, self.voice_id))
+                reply.append(spoken)
+            task = asyncio.create_task(self.voice.synthesize(spoken, self.voice_id))
             pending_tts.append(task)
-            speech.put_nowait((sentence, task))
+            speech.put_nowait((clean_for_speech(spoken), task))
 
         try:
             if self.persona is None:
                 await self._birth(image, frame_id, lambda s: say(s, record=False), focus, user_text)
 
             await self.status("thinking")
-            model, words = await self.llm.reply_stream(self.persona, self.history, user_text, image)
+            model, words = await self.llm.reply_stream(self.persona, self.history, user_text, image, audio_tags=tags)
             await self.send({"type": "model", "model": model})
             buffer = ""
             async for delta in words:
@@ -246,11 +292,11 @@ class Session:
                     await self.send({"type": "stop"})
             raise
 
-        reply_text = " ".join(reply)
+        reply_text = " ".join(reply)  # with its audio tags, so the model keeps using them
         self.history += [{"role": "user", "text": user_text}, {"role": "model", "text": reply_text}]
         self.history = self.history[-MAX_HISTORY:]
         name = self.persona["name"]
-        self.memory.log(self.id, "turn", name, {"user": user_text, "reply": reply_text})
+        self.memory.log(self.id, "turn", name, {"user": user_text, "reply": clean_for_speech(reply_text)})
 
     async def _birth(
         self, image: bytes | None, frame_id: str | None, say, focus: str | None = None, user_text: str | None = None
@@ -262,7 +308,7 @@ class Session:
         self._start_waking(image, frame_id, focus, user_text)
         try:
             # Shielded so an interrupted turn doesn't throw away a persona that's nearly ready.
-            persona = await asyncio.shield(self._waking)
+            persona, designed = await asyncio.shield(self._waking)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -271,7 +317,8 @@ class Session:
         self.persona, self._waking = persona, None
         frame_id, self._waking_frame = self._waking_frame, None
         log.info("[timing] persona ready %.2fs after release", time.perf_counter() - self._turn_start)
-        self.voice_id = voice_id_for(self.persona.get("voice"))
+        self._designed_voice = designed
+        self.voice_id = designed or voice_id_for(self.persona.get("voice"))
         # box is where the object sits in frame frame_id, so the device can pin its AR marker there.
         await self.send({"type": "persona", "persona": self.persona, "box": persona["box_2d"], "frame_id": frame_id})
         self.memory.log(self.id, "object", self.persona["name"], self.persona)
@@ -280,7 +327,7 @@ class Session:
         sentences, rest = pop_sentences(greeting + " ")
         for s in sentences + ([rest.strip()] if rest.strip() else []):
             say(s)
-        self.history.append({"role": "model", "text": clean_for_speech(greeting)})
+        self.history.append({"role": "model", "text": clean_for_speech(greeting, keep_tags=self.voice.supports_tags)})
 
     async def _speak_in_order(self, speech: asyncio.Queue) -> None:
         """Send sentences to the device in order, as soon as each one's audio is ready."""
@@ -288,6 +335,8 @@ class Session:
         while (item := await speech.get()) is not None:
             sentence, tts = item
             audio = await tts
+            if not audio and not sentence:
+                continue  # just an audio tag, and no voice to act it out
             if first:
                 log.info("[timing] first audio %.2fs after release", time.perf_counter() - self._turn_start)
                 await self.status("speaking")

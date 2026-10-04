@@ -4,14 +4,21 @@ import re
 
 # Sentence end: terminal punctuation, optional closing quotes/brackets/asterisks, then whitespace.
 _BOUNDARY = re.compile(r"[.!?…]+[\"')\]*]*\s+")
-# Stage directions like *sighs* or [laughs], and leftover markdown symbols.
-_STAGE_DIRECTION = re.compile(r"\*[^*]*\*|\[[^\]]*\]")
+# Stage directions like *sighs*, audio tags like [laughs], and leftover markdown symbols.
+_STAGE_DIRECTION = re.compile(r"\*[^*]*\*")
+_AUDIO_TAG = re.compile(r"\[[^\]]*\]")
 _MARKDOWN = re.compile(r"[*_#`~]+")
 
 
-def clean_for_speech(text: str) -> str:
-    """Remove things the model shouldn't say out loud."""
-    text = _MARKDOWN.sub("", _STAGE_DIRECTION.sub("", text))
+def clean_for_speech(text: str, keep_tags: bool = False) -> str:
+    """Remove things the model shouldn't say out loud.
+
+    keep_tags keeps audio tags like [laughs] for voices that act them out (Eleven v3/v4).
+    """
+    text = _STAGE_DIRECTION.sub("", text)
+    if not keep_tags:
+        text = _AUDIO_TAG.sub("", text)
+    text = _MARKDOWN.sub("", text)
     return re.sub(r"\s{2,}", " ", text).strip()
 
 
