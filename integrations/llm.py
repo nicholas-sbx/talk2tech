@@ -17,7 +17,7 @@ BIRTH_PROMPT = f"""Look at this photo and find the two most prominent physical o
 Imagine each object just woke up and can talk. Invent a vivid, witty personality that fits how it
 looks (a cracked mug might be a grumpy veteran, a houseplant a passive-aggressive roommate. Keep the language conversational
 and colloquial, but make sure the personality is evident).
-{pick}
+{{pick}}
 {{user_context}}
 
 Reply with JSON only, using exactly this shape:
