@@ -1,10 +1,14 @@
 // AR on phones via the 8th Wall engine (world tracking in plain iOS Safari and Android Chrome),
 // rendered with three.js. 8th Wall owns the camera: it draws the feed, tracks the phone's pose,
 // and gives us the frames we send to Gemini. When Gemini says where the object is in one of those
-// frames, a 3D smiley face is stuck flat onto its surface in the tracked 3D world.
+// frames, a scribbled face (scribble.js) is stuck flat onto its surface in the tracked 3D world. It
+// talks while the reply plays, panics and screams as the object nears the edge of the screen, and
+// dies if it's lost off it, until Gemini next places it.
 //
 // 8th Wall engine © Niantic Spatial, Inc., used under the XR Engine License Agreement:
 // https://github.com/8thwall/engine/blob/main/LICENSE
+
+import { EdgeFearSystem, ProceduralAudio, ScribbleFace } from "./scribble.js";
 
 const ENGINE_URL = "https://cdn.jsdelivr.net/npm/@8thwall/engine-binary@1.0.0/dist/xr.js";
 const MAX_FRAME_SIDE = 768;
@@ -24,7 +28,13 @@ const SMILEY_MAX = 0.8;
 const SMILEY_MIN_VIEW = 0.1;
 // Gemini picks the smiley's diameter as a share of the object's visible width; this is used until it does.
 const DEFAULT_SMILEY_SIZE = 0.5;
-const GLOW_HZ = 1.2;
+// The face is drawn on a canvas texture: FACE_UNITS of the drawing (eyes, mouth, brows at rest)
+// span one smiley diameter, and the plane is FACE_PLANE diameters across so bulging eyes, the
+// scream and sweat still fit.
+const FACE_UNITS = 110;
+const FACE_PLANE = 2.4;
+const FACE_PIXELS = 512;
+const OFFSCREEN_MARGIN = 0.05; // how far past the screen's edge (share of the screen) counts as lost
 const FOLLOW = 0.15; // per-frame easing toward a new placement, so re-locating doesn't jump
 const MIN_PLANE_HITS = 4; // fewer hits than this can't give a trustworthy surface angle
 const MAX_PLANE_ROUGHNESS = 0.2; // reject fits whose points stray from the plane by more than this share of their spread
@@ -56,7 +66,9 @@ let XR8 = null;
 let canvas = null;
 let gl = null;
 let running = false;
-let smiley, smileyFace;
+let smiley, faceCanvas, faceTexture;
+const face = new ScribbleFace();
+let audio = null;
 
 // Camera pose, projection and 3D points for each frame we sent, so a box that arrives seconds
 // later still maps onto the world the way it was when the photo was taken.
@@ -83,6 +95,11 @@ export function arSupported() {
   const iPad = /Macintosh/.test(ua) && navigator.maxTouchPoints > 1;
   return window.isSecureContext && (/Android|iPhone|iPad|iPod/.test(ua) || iPad);
 }
+
+// Don't leave a scream ringing while the page is in the background.
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "hidden") audio?.reset();
+});
 
 // The engine is ~6 MB, so start fetching it as soon as the page loads on a phone.
 const engine = arSupported() ? loadEngine() : null;
@@ -111,8 +128,9 @@ export function inAR() {
   return running;
 }
 
-// Resolves once the camera feed is up and tracking has started.
-export async function startAR() {
+// Resolves once the camera feed is up and tracking has started. Screams play through audioContext.
+export async function startAR(audioContext) {
+  audio = new ProceduralAudio(audioContext);
   if (!engine) throw new Error("AR needs a phone.");
   XR8 = await engine;
   await XR8.loadChunk("slam");
@@ -242,6 +260,7 @@ export function placeBox(box, frameId, fit = DEFAULT_SMILEY_SIZE) {
     // home and leash: where the box put it, and how far re-checks may move it from there.
     placement = { point, normal, up, size: side, home: point.clone(), leash: depth * REFINE_LEASH };
   }
+  revive();
   aimMarker();
 
   const fmt = (v) => v.toArray().map((n) => n.toFixed(2)).join(", ");
@@ -252,6 +271,19 @@ export function clearMarker() {
   placement = null;
   targetPosition = null;
   if (smiley) smiley.visible = false;
+  revive();
+}
+
+// Flaps the face's mouth while a reply plays.
+export function setSpeaking(on) {
+  face.speaking = Boolean(on);
+}
+
+// Back from the dead (or calm again): a fresh placement starts unafraid.
+function revive() {
+  face.isDead = false;
+  face.panic = 0;
+  audio?.reset();
 }
 
 // Turns the placement into the smiley's pose: its back flat on the surface, its face along the
@@ -463,7 +495,8 @@ function showStats() {
     const at = smiley.position.clone().project(camera);
     const onScreen = at.z < 1 && Math.abs(at.x) <= 1 && Math.abs(at.y) <= 1;
     const where = `screen ${Math.round((at.x + 1) * 50)}%, ${Math.round((1 - at.y) * 50)}%${onScreen ? "" : " (off screen)"}`;
-    markerState = `${where}, ${stats.refines} surface re-checks (last: ${stats.lastRefine || "none"})`;
+    const mood = face.isDead ? "dead" : `panic ${face.panic.toFixed(2)}`;
+    markerState = `${where}, ${mood}, ${stats.refines} surface re-checks (last: ${stats.lastRefine || "none"})`;
   }
   el.textContent = [
     `tracking: ${tracking}`,
@@ -531,74 +564,45 @@ function sceneModule() {
     name: "talk2tech-scene",
     onStart: () => {
       const { scene, camera } = XR8.Threejs.xrScene();
-      scene.add(new THREE.HemisphereLight(0xffffff, 0x445544, 1.5));
       scene.add(makeSmiley());
       camera.position.set(0, CAMERA_HEIGHT, 0);
       XR8.XrController.updateCameraProjectionMatrix({ origin: camera.position, facing: camera.quaternion });
     },
     onUpdate: () => {
       if (++updates % REFINE_EVERY === 0) refineOnSurface(XR8.Threejs.xrScene().camera);
-      animateMarker(performance.now());
+      animateMarker(performance.now(), XR8.Threejs.xrScene().camera);
     },
   };
 }
 
 // ---------- the smiley ----------
 
-// A unit-diameter smiley face: a thin yellow disc whose back sits at z = 0 and whose face points
-// along +Z, with raised eyes and smile, so it can be stuck flat onto a surface.
+// A unit-diameter face: a transparent square, FACE_PLANE diameters across, facing +Z at z = 0 with
+// the scribble face drawn on it, so it can be stuck flat onto a surface.
 function makeSmiley() {
-  const DEPTH = 0.08;
-  // Mostly self-lit, so it's bright yellow whatever the room's like; the light just adds shading.
-  smileyFace = new THREE.MeshStandardMaterial({
-    color: 0xffd23f,
-    emissive: 0xffc400,
-    emissiveIntensity: 0.7,
-    roughness: 0.45,
+  faceCanvas = document.createElement("canvas");
+  faceCanvas.width = faceCanvas.height = FACE_PIXELS;
+  faceTexture = new THREE.CanvasTexture(faceCanvas);
+  faceTexture.colorSpace = THREE.SRGBColorSpace;
+  // Drawn last and over everything (there's no real-world occlusion anyway), so nothing in the GL
+  // state left by the camera feed can hide it.
+  const material = new THREE.MeshBasicMaterial({
+    map: faceTexture,
+    transparent: true,
     side: THREE.DoubleSide,
+    depthTest: false,
+    depthWrite: false,
   });
-  const ink = new THREE.MeshStandardMaterial({ color: 0x1a1006, roughness: 0.6 });
-  const rimMaterial = new THREE.MeshStandardMaterial({ color: 0xf0a000, emissive: 0xc07800, emissiveIntensity: 0.6 });
-
-  const disc = new THREE.CylinderGeometry(0.5, 0.5, DEPTH, 48);
-  disc.rotateX(Math.PI / 2);
-  disc.translate(0, 0, DEPTH / 2);
-  const rim = new THREE.TorusGeometry(0.5, 0.025, 8, 48);
-  rim.translate(0, 0, DEPTH);
-
-  const eye = new THREE.SphereGeometry(0.07, 16, 12);
-  eye.scale(1, 1.5, 0.5);
-  const leftEye = eye.clone().translate(-0.17, 0.14, DEPTH);
-  const rightEye = eye.clone().translate(0.17, 0.14, DEPTH);
-
-  // The lower half of a ring.
-  const smile = new THREE.TorusGeometry(0.28, 0.04, 10, 32, Math.PI);
-  smile.rotateZ(Math.PI);
-  smile.translate(0, 0.02, DEPTH);
-
-  // Drawn last and over everything (there's no real-world occlusion anyway), back to front, so
-  // nothing in the GL state left by the camera feed can hide it.
-  const parts = [
-    [disc, smileyFace, 10],
-    [rim, rimMaterial, 11],
-    [leftEye, ink, 12],
-    [rightEye, ink, 12],
-    [smile, ink, 12],
-  ];
+  const mesh = new THREE.Mesh(new THREE.PlaneGeometry(FACE_PLANE, FACE_PLANE), material);
+  mesh.renderOrder = 10;
+  mesh.frustumCulled = false;
   smiley = new THREE.Group();
-  for (const [geometry, material, order] of parts) {
-    material.depthTest = false;
-    material.depthWrite = false;
-    const mesh = new THREE.Mesh(geometry, material);
-    mesh.renderOrder = order;
-    mesh.frustumCulled = false;
-    smiley.add(mesh);
-  }
+  smiley.add(mesh);
   smiley.visible = false;
   return smiley;
 }
 
-function animateMarker(time) {
+function animateMarker(time, camera) {
   if (!targetPosition) return;
   if (!smiley.visible) {
     smiley.position.copy(targetPosition);
@@ -611,6 +615,29 @@ function animateMarker(time) {
     size += (placement.size - size) * FOLLOW;
   }
   smiley.scale.setScalar(size);
-  // Stuck on, so it doesn't move or scale: it just glows gently.
-  smileyFace.emissiveIntensity = 0.7 + 0.15 * Math.sin((time / 1000) * 2 * Math.PI * GLOW_HZ);
+  feelTheEdges(camera);
+  const ctx = faceCanvas.getContext("2d");
+  ctx.clearRect(0, 0, FACE_PIXELS, FACE_PIXELS);
+  face.draw(ctx, FACE_PIXELS / 2, FACE_PIXELS / 2, FACE_PIXELS / (FACE_UNITS * FACE_PLANE), time);
+  faceTexture.needsUpdate = true;
+}
+
+// Where the face is on screen: near an edge it panics, looks at that edge and screams; past it (or
+// behind the camera) it dies.
+function feelTheEdges(camera) {
+  if (face.isDead) return;
+  camera.updateMatrixWorld();
+  const behind = smiley.position.clone().applyMatrix4(camera.matrixWorldInverse).z >= 0;
+  const at = smiley.position.clone().project(camera);
+  const u = (at.x + 1) / 2;
+  const v = (1 - at.y) / 2;
+  if (EdgeFearSystem.isOffscreen(u, v, OFFSCREEN_MARGIN, behind)) {
+    face.isDead = true;
+    audio?.triggerDeathSequence();
+    return;
+  }
+  face.panic = EdgeFearSystem.computePanic(EdgeFearSystem.computeEdgeDistances(u, v).d);
+  const gaze = { left: { x: -1, y: 0 }, right: { x: 1, y: 0 }, top: { x: 0, y: -1 }, bottom: { x: 0, y: 1 } };
+  face.gazeDirection = gaze[EdgeFearSystem.getNearestEdge(u, v)];
+  audio?.updatePanic(face.panic);
 }
