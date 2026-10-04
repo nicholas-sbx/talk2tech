@@ -711,12 +711,6 @@ window.addEventListener("keydown", (e) => {
   }
 });
 
-const debugSlapBtn = $("#debug-slap");
-if (debugSlapBtn) {
-  debugSlapBtn.hidden = !DEBUG;
-  debugSlapBtn.addEventListener("click", () => handleSlap());
-}
-
 $("#reset").addEventListener("click", () => {
   stopSpeech();
   send({ type: "reset" });

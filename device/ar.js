@@ -103,11 +103,33 @@ let slapListener = null;
 let lastCameraPos = null;
 let lastCameraQuat = null;
 let isCameraSteady = false;
+let steadySince = null;
+let lastHandMotion = -Infinity;
 let roiBuffer = null;
 let prevRoi = null;
+let prevBackground = null;
 let lastSlapTriggerTime = 0;
 const SLAP_OPTICAL_THRESHOLD = 26.0;
 const SLAP_DEBOUNCE_MS = 1200;
+// Moving the camera changes the whole picture, a slap only the object: the background has to stay
+// this still (average brightness change per pixel) for a change on the object to count.
+const SLAP_BACKGROUND_STILL = 5.0;
+// How long the camera must be held still, by both tracking and the phone's sensors, before watching.
+const SLAP_SETTLE_MS = 600;
+// The phone's own sensors: more spin (degrees/s) or shove (m/s², gravity removed) than a steady hand.
+const SLAP_MAX_SPIN = 15;
+const SLAP_MAX_SHOVE = 0.8;
+const PATCH = 16;
+// Spots away from the face, as fractions of the screen, to watch for the whole picture changing.
+const BACKGROUND_SPOTS = [[0.15, 0.15], [0.85, 0.15], [0.15, 0.85], [0.85, 0.85], [0.5, 0.1], [0.5, 0.9]];
+
+window.addEventListener("devicemotion", (e) => {
+  const r = e.rotationRate;
+  const a = e.acceleration;
+  const spin = r ? Math.hypot(r.alpha || 0, r.beta || 0, r.gamma || 0) : 0;
+  const shove = a ? Math.hypot(a.x || 0, a.y || 0, a.z || 0) : 0;
+  if (spin > SLAP_MAX_SPIN || shove > SLAP_MAX_SHOVE) lastHandMotion = performance.now();
+});
 
 // Camera pose, projection and 3D points for each frame we sent, so a box that arrives seconds
 // later still maps onto the world the way it was when the photo was taken.
@@ -701,7 +723,11 @@ function checkCameraStability(camera) {
   const linearVel = camPos.distanceTo(lastCameraPos);
   const dot = Math.min(1, Math.max(-1, camQuat.dot(lastCameraQuat)));
   const angularVel = 2 * Math.acos(Math.abs(dot));
-  isCameraSteady = linearVel < 0.012 && angularVel < 0.025;
+  const now = performance.now();
+  const still = linearVel < 0.008 && angularVel < 0.015 && now - lastHandMotion > SLAP_SETTLE_MS;
+  if (!still) steadySince = null;
+  else steadySince ??= now;
+  isCameraSteady = steadySince !== null && now - steadySince > SLAP_SETTLE_MS;
   lastCameraPos.copy(camPos);
   lastCameraQuat.copy(camQuat);
 }
@@ -709,51 +735,71 @@ function checkCameraStability(camera) {
 function detectObjectPhysicalMotion(camera) {
   if (!running || !gl || !placement || !smiley || !smiley.visible || !isCameraSteady) {
     prevRoi = null;
+    prevBackground = null;
     return;
   }
   camera.updateMatrixWorld();
   const at = smiley.position.clone().project(camera);
   if (at.z >= 1 || Math.abs(at.x) > 0.95 || Math.abs(at.y) > 0.95) {
     prevRoi = null;
+    prevBackground = null;
     return;
   }
   const u = (at.x + 1) / 2;
   const v = (1 - at.y) / 2;
-  const width = gl.drawingBufferWidth;
-  const height = gl.drawingBufferHeight;
-  const px = Math.floor(u * width);
-  const py = Math.floor((1 - v) * height);
 
-  const patchSize = 16;
-  const half = patchSize / 2;
-  const rx = Math.max(0, Math.min(width - patchSize, px - half));
-  const ry = Math.max(0, Math.min(height - patchSize, py - half));
-
-  if (!roiBuffer) roiBuffer = new Uint8Array(patchSize * patchSize * 4);
   const bound = gl.getParameter(gl.FRAMEBUFFER_BINDING);
   gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-  gl.readPixels(rx, ry, patchSize, patchSize, gl.RGBA, gl.UNSIGNED_BYTE, roiBuffer);
+  if (!roiBuffer) roiBuffer = new Uint8Array(PATCH * PATCH * 4);
+  readPatch(u, v, roiBuffer);
+  // Only spots well clear of the face, so the object itself moving doesn't count as background.
+  const background = BACKGROUND_SPOTS.map(([bu, bv]) =>
+    Math.hypot(bu - u, bv - v) < 0.3 ? null : readPatch(bu, bv, new Uint8Array(PATCH * PATCH * 4)),
+  );
   gl.bindFramebuffer(gl.FRAMEBUFFER, bound);
 
-  if (prevRoi) {
-    let diffSum = 0;
-    for (let i = 0; i < roiBuffer.length; i += 4) {
-      const lum = (roiBuffer[i] + roiBuffer[i + 1] + roiBuffer[i + 2]) / 3;
-      const prevLum = (prevRoi[i] + prevRoi[i + 1] + prevRoi[i + 2]) / 3;
-      diffSum += Math.abs(lum - prevLum);
-    }
-    const avgDiff = diffSum / (patchSize * patchSize);
-    stats.opticalDiff = avgDiff.toFixed(1);
+  if (prevRoi && prevBackground) {
+    const avgDiff = patchDiff(roiBuffer, prevRoi);
+    let backgroundDiff = 0;
+    let spotsSeen = 0;
+    background.forEach((patch, i) => {
+      if (!patch || !prevBackground[i]) return;
+      backgroundDiff = Math.max(backgroundDiff, patchDiff(patch, prevBackground[i]));
+      spotsSeen++;
+    });
+    stats.opticalDiff = `${avgDiff.toFixed(1)} (background ${backgroundDiff.toFixed(1)})`;
 
     const now = performance.now();
-    if (avgDiff > SLAP_OPTICAL_THRESHOLD && now - lastSlapTriggerTime > SLAP_DEBOUNCE_MS) {
+    const objectMoved = avgDiff > SLAP_OPTICAL_THRESHOLD;
+    const pictureStill = spotsSeen >= 2 && backgroundDiff < SLAP_BACKGROUND_STILL;
+    if (objectMoved && pictureStill && now - lastSlapTriggerTime > SLAP_DEBOUNCE_MS) {
       lastSlapTriggerTime = now;
       stats.slaps = (stats.slaps || 0) + 1;
       slapListener?.();
     }
   }
-  if (!prevRoi) prevRoi = new Uint8Array(patchSize * patchSize * 4);
+  if (!prevRoi) prevRoi = new Uint8Array(PATCH * PATCH * 4);
   prevRoi.set(roiBuffer);
+  prevBackground = background;
+}
+
+// Reads the PATCH x PATCH square of the screen centred on (u, v), as fractions from the top left.
+function readPatch(u, v, out) {
+  const width = gl.drawingBufferWidth;
+  const height = gl.drawingBufferHeight;
+  const x = Math.max(0, Math.min(width - PATCH, Math.floor(u * width) - PATCH / 2));
+  const y = Math.max(0, Math.min(height - PATCH, Math.floor((1 - v) * height) - PATCH / 2));
+  gl.readPixels(x, y, PATCH, PATCH, gl.RGBA, gl.UNSIGNED_BYTE, out);
+  return out;
+}
+
+// Average change in brightness per pixel between two patches.
+function patchDiff(a, b) {
+  let sum = 0;
+  for (let i = 0; i < a.length; i += 4) {
+    sum += Math.abs((a[i] + a[i + 1] + a[i + 2]) / 3 - (b[i] + b[i + 1] + b[i + 2]) / 3);
+  }
+  return sum / (PATCH * PATCH);
 }
 
 // ---------- the smiley ----------
