@@ -58,12 +58,17 @@
     <div class="start-foot">
       <p id="start-error" class="start-error"></p>
       <button id="start-btn">Start</button>
+      <p class="credit">
+        AR by the 8th Wall engine, © Niantic Spatial, Inc. Used under the
+        <a href="https://github.com/8thwall/engine/blob/main/LICENSE" target="_blank" rel="noopener">XR Engine License Agreement</a>,
+        provided as is, without warranties.
+      </p>
     </div>
   </div>
 
   <canvas id="debug-frame" class="debug-frame" hidden></canvas>
 
-  <!-- Three.js is only fetched (by ar.js) when a WebXR AR session starts. -->
+  <!-- Three.js is only fetched (by ar.js) when AR starts. -->
   <script type="importmap">{ "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js" } }</script>
   <script type="module" src="app.js"></script>
 </body>

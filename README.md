@@ -3,7 +3,7 @@
 Point your phone at any object and talk to it. It wakes up with its own personality and voice and
 talks back, in character, about what it sees.
 
-**Stack:** mobile web client · FastAPI · Gemini (vision) · ElevenLabs (speech) · local JSONL (analytics)
+**Stack:** mobile web client · FastAPI · Gemini (vision) · ElevenLabs (speech) · 8th Wall + three.js (AR) · local JSONL (analytics)
 
 ## Repo layout
 
@@ -43,6 +43,12 @@ Run `.\start.ps1 -Tunnel` (or `./start.sh --tunnel`) and open the printed `https
 URL on the phone. Install cloudflared with `winget install Cloudflare.cloudflared` or
 `brew install cloudflared`, or use `ngrok http 8000` instead.
 Without HTTPS the page still loads, but only the typed fallback works.
+
+On a phone the camera runs through the [8th Wall engine](https://8thwall.org) (world tracking in plain
+Safari or Chrome, no app or WebXR needed). When an object wakes up, a pulsing green cube appears on it
+and stays there as you move. Allow motion access when asked; without it the app falls back to the
+plain camera view. The engine is © Niantic Spatial, Inc., used under its
+[XR Engine License Agreement](https://github.com/8thwall/engine/blob/main/LICENSE).
 
 **Controls:** hold the big button and talk, release to send. Holding it again interrupts the reply.
 The reset button (top right) forgets the current object so you can wake up a new one. The keyboard

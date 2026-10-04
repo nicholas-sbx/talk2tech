@@ -1,7 +1,7 @@
 // talk2tech device client: camera + push-to-talk mic -> backend WebSocket -> spoken replies.
 // Message formats: docs/protocol.md
 
-import { arSupported, startAR, captureFrame, placeBox, clearCube, inAR } from "./ar.js";
+import { arSupported, requestMotionPermission, startAR, captureFrame, placeBox, clearCube, inAR } from "./ar.js";
 
 const $ = (sel) => document.querySelector(sel);
 const video = $("#cam");
@@ -30,7 +30,6 @@ const MAX_CAPTION_LINES = 60;
 const TEXT_HIDE_DELAY_MS = 300;
 const DEBUG = new URLSearchParams(location.search).has("debug");
 const DEBUG_FRAMES_KEPT = 10;
-// Checked up front so the Start tap can go straight into AR without spending its user gesture.
 const arAvailable = arSupported();
 
 let ws;
@@ -56,16 +55,15 @@ let thingLine = null;
 
 // ---------- startup ----------
 
-const startBtn = $("#start-btn");
-
-startBtn.addEventListener("click", async () => {
-  if (startBtn.dataset.step === "ar") return enterAR();
-  // Must run inside a tap: iOS only unlocks audio playback and camera from a user gesture.
+$("#start-btn").addEventListener("click", async () => {
+  // Must run inside a tap: iOS only unlocks audio playback, camera and motion sensors from a user
+  // gesture. Motion is asked for before anything awaits, while the tap still counts.
+  const motion = arAvailable ? requestMotionPermission() : null;
   audioCtx = new (window.AudioContext || window.webkitAudioContext)();
   await audioCtx.resume();
   // Safari keeps the audio session type across reloads; a leftover "playback" blocks the mic.
   setAudioSession("auto");
-  if (await arAvailable) return startWithAR();
+  if (arAvailable) return startWithAR(motion);
   try {
     const stream = await navigator.mediaDevices.getUserMedia({ video: VIDEO, audio: AUDIO });
     useCamera(new MediaStream(stream.getVideoTracks()));
@@ -88,39 +86,27 @@ startBtn.addEventListener("click", async () => {
   finishStart();
 });
 
-// AR owns the camera, so only the mic comes from getUserMedia.
-async function startWithAR() {
+// The AR engine owns the camera, so only the mic comes from getUserMedia here.
+async function startWithAR(motion) {
+  await motion;
   try {
     useMic(await navigator.mediaDevices.getUserMedia({ audio: AUDIO }));
     micAllowed = true;
   } catch (err) {
     console.warn(err);
   }
-  // Answering the mic prompt can use up the tap, and entering AR needs a fresh one.
-  if (navigator.userActivation && !navigator.userActivation.isActive) {
-    startBtn.dataset.step = "ar";
-    startBtn.textContent = "Start AR";
-    return;
-  }
-  enterAR();
-}
-
-async function enterAR() {
+  let arError = null;
   try {
-    await startAR(document.body, { onEnd: leaveAR });
+    await startAR();
     document.documentElement.classList.add("ar");
   } catch (err) {
-    // No ARCore, camera access refused, etc.: carry on with the plain camera view.
+    // Camera or motion access refused, unsupported browser, etc.: carry on with the plain camera view.
     console.warn("AR unavailable", err);
-    retryCamera();
+    arError = err;
+    navigator.mediaDevices.getUserMedia({ video: VIDEO }).then(useCamera, retryCamera);
   }
   finishStart();
-}
-
-// The AR session ended (e.g. the system back button): fall back to the plain camera view.
-function leaveAR() {
-  document.documentElement.classList.remove("ar");
-  retryCamera();
+  if (arError) line("error", `AR is off: ${arError.message}`);
 }
 
 function finishStart() {
