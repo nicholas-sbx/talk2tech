@@ -39,7 +39,10 @@ html, body {
 /* In AR the 8th Wall engine draws the camera feed (and the cube) into its own canvas instead. */
 html.ar #cam { display: none; }
 #ar-canvas { position: fixed; inset: 0; width: 100%; height: 100%; z-index: 0; }
-.top, .bottom, .start, .debug-frame, .ar-debug { z-index: 1; }
+/* The waking-up spell (magic.js): over the camera, under the controls, and never in the way of a tap. */
+.magic { position: fixed; inset: 0; width: 100%; height: 100%; z-index: 1; pointer-events: none; }
+.magic[hidden] { display: none; }
+.top, .bottom, .start, .debug-frame, .ar-debug { z-index: 2; }
 
 button { font: inherit; color: inherit; cursor: pointer; }
 button:focus-visible { outline: 2px solid var(--fg); outline-offset: 2px; }
@@ -127,8 +130,10 @@ body:not(.show-text) .line.thing { display: none; }
 .status { font-size: 13px; color: var(--muted); min-height: 18px; margin-bottom: 14px; text-align: center; text-shadow: var(--shadow); }
 .controls { display: flex; align-items: center; justify-content: space-between; max-width: 320px; margin: 0 auto; }
 
-/* Shutter-style talk button: white ring, white core, red while recording. */
+/* Shutter-style talk button: white ring, white core, red while recording. While a reply is on its
+   way the ring turns into a spinner; it can still be held to cut in. */
 .talk {
+  position: relative;
   width: 76px; height: 76px;
   padding: 0;
   border-radius: 50%;
@@ -137,6 +142,7 @@ body:not(.show-text) .line.thing { display: none; }
   display: grid;
   place-items: center;
   touch-action: none;
+  transition: border-color 0.2s;
 }
 .talk-core {
   width: 60px; height: 60px;
@@ -146,6 +152,31 @@ body:not(.show-text) .line.thing { display: none; }
 }
 .talk:disabled { opacity: 0.35; }
 .talk.recording .talk-core { background: var(--record); transform: scale(0.85); }
+
+/* Drawn over the ring (r 36 is the middle of the 4px border); its circumference is about 226. */
+.talk-spin {
+  position: absolute;
+  top: -4px; left: -4px;
+  width: 76px; height: 76px;
+  fill: none;
+  stroke: var(--fg);
+  stroke-width: 4;
+  stroke-linecap: round;
+  opacity: 0;
+  transition: opacity 0.2s;
+  pointer-events: none;
+}
+.talk.waiting { border-color: rgba(255, 255, 255, 0.25); }
+.talk.waiting .talk-core { transform: scale(0.6); }
+.talk.waiting .talk-spin { opacity: 1; animation: talk-turn 2s linear infinite; }
+.talk.waiting .talk-spin circle { animation: talk-arc 1.5s ease-in-out infinite; }
+@keyframes talk-turn { to { transform: rotate(360deg); } }
+/* The arc stretches out, then its tail catches up, as it goes round. */
+@keyframes talk-arc {
+  0% { stroke-dasharray: 2 226; stroke-dashoffset: 0; }
+  50% { stroke-dasharray: 160 226; stroke-dashoffset: -63; }
+  100% { stroke-dasharray: 160 226; stroke-dashoffset: -223; }
+}
 
 .text-form { display: flex; gap: 8px; max-width: 480px; margin: 16px auto 0; }
 .text-form[hidden] { display: none; }
