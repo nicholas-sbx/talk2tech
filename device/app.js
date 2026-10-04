@@ -1,7 +1,7 @@
 // talk2tech device client: camera + push-to-talk mic -> backend WebSocket -> spoken replies.
 // Message formats: docs/protocol.md
 
-import { arSupported, requestMotionPermission, startAR, captureFrame, placeBox, clearMarker, inAR, setSpeaking } from "./ar.js";
+import { arSupported, requestMotionPermission, startAR, captureFrame, placeBox, clearMarker, inAR, setSpeaking, onDeath } from "./ar.js";
 
 const $ = (sel) => document.querySelector(sel);
 const video = $("#cam");
@@ -479,6 +479,12 @@ showTextBtn.addEventListener("click", () => {
   const on = showTextBtn.getAttribute("aria-pressed") !== "true";
   setShowText(on);
   try { localStorage.setItem("showText", on ? "1" : "0"); } catch {}
+});
+
+// The face died (lost off screen): it stops mid-sentence and the rest of the reply is dropped.
+onDeath(() => {
+  stopSpeech();
+  send({ type: "interrupt" });
 });
 
 $("#reset").addEventListener("click", () => {
