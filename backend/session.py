@@ -33,6 +33,9 @@ class Session:
         self._turn: asyncio.Task | None = None
         # Persona generation started early, from the frame sent when the talk button is pressed.
         self._waking: asyncio.Task | None = None
+        self._waking_frame: str | None = None  # frame_id of the image the persona is made from
+        # Re-finds the object in each turn's frame so the device can re-anchor its AR marker.
+        self._locating: asyncio.Task | None = None
         self._turn_start = 0.0
         self._send_lock = asyncio.Lock()
 
@@ -58,16 +61,18 @@ class Session:
                 msg = await self.ws.receive_json()
                 kind = msg.get("type")
                 if kind == "frame":
-                    self._start_waking(_decode(msg.get("image")))
+                    self._start_waking(_decode(msg.get("image")), msg.get("frame_id"))
                 elif kind == "audio":
                     self._start_turn(self._audio_turn(msg))
                 elif kind == "text":
-                    self._start_turn(self._respond(msg.get("text", "").strip(), _decode(msg.get("image"))))
+                    image, frame_id = _decode(msg.get("image")), msg.get("frame_id")
+                    self._start_turn(self._respond(msg.get("text", "").strip(), image, frame_id))
                 elif kind == "interrupt":
                     self._cancel_turn()
                 elif kind == "reset":
                     self._cancel_turn()
                     self._cancel_waking()
+                    self._cancel_locating()
                     self.persona, self.voice_id, self.history = None, None, []
                     await self.send({"type": "reset"})
         except WebSocketDisconnect:
@@ -75,16 +80,39 @@ class Session:
         finally:
             self._cancel_turn()
             self._cancel_waking()
+            self._cancel_locating()
 
-    def _start_waking(self, image: bytes | None) -> None:
+    def _start_waking(self, image: bytes | None, frame_id: str | None) -> None:
         """Begin generating the persona while the user is still talking."""
         if self.persona is None and self._waking is None:
             self._waking = asyncio.create_task(self.llm.make_persona(image))
+            self._waking_frame = frame_id if image else None
 
     def _cancel_waking(self) -> None:
         if self._waking:
             self._waking.cancel()
             self._waking = None
+        self._waking_frame = None
+
+    def _start_locating(self, image: bytes, frame_id: str | None) -> None:
+        """Find the object in this turn's frame, alongside the reply."""
+        self._cancel_locating()
+        self._locating = asyncio.create_task(self._locate(image, frame_id))
+
+    def _cancel_locating(self) -> None:
+        if self._locating and not self._locating.done():
+            self._locating.cancel()
+
+    async def _locate(self, image: bytes, frame_id: str | None) -> None:
+        try:
+            box = await self.llm.locate(image, self.persona["object"])
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.warning("locate failed", exc_info=True)  # only the AR marker misses an update
+            return
+        if box:
+            await self.send({"type": "box", "box": box, "frame_id": frame_id})
 
     def _start_turn(self, coro) -> None:
         # A new turn interrupts whatever the object was saying.
@@ -114,12 +142,14 @@ class Session:
             await self.send({"type": "error", "message": "Didn't catch that. Try again?"})
             await self.status("idle")
             return
-        await self._respond(text, _decode(msg.get("image")))
+        await self._respond(text, _decode(msg.get("image")), msg.get("frame_id"))
 
-    async def _respond(self, user_text: str, image: bytes | None) -> None:
+    async def _respond(self, user_text: str, image: bytes | None, frame_id: str | None = None) -> None:
         if not user_text:
             return
         await self.send({"type": "transcript", "text": user_text})
+        if self.persona is not None and image:
+            self._start_locating(image, frame_id)
 
         speech: asyncio.Queue = asyncio.Queue()
         speaker = asyncio.create_task(self._speak_in_order(speech))
@@ -139,7 +169,7 @@ class Session:
 
         try:
             if self.persona is None:
-                await self._birth(image, lambda s: say(s, record=False))
+                await self._birth(image, frame_id, lambda s: say(s, record=False))
 
             await self.status("thinking")
             buffer = ""
@@ -167,10 +197,10 @@ class Session:
         name = self.persona["name"]
         self.memory.log(self.id, "turn", name, {"user": user_text, "reply": reply_text})
 
-    async def _birth(self, image: bytes | None, say) -> None:
+    async def _birth(self, image: bytes | None, frame_id: str | None, say) -> None:
         """First sight of an object: identify it and give it a personality and voice."""
         await self.status("waking")
-        self._start_waking(image)  # no-op if the button press already started it
+        self._start_waking(image, frame_id)  # no-op if the button press already started it
         try:
             # Shielded so an interrupted turn doesn't throw away a persona that's nearly ready.
             persona = await asyncio.shield(self._waking)
@@ -180,9 +210,11 @@ class Session:
             self._waking = None  # let the next turn try again
             raise
         self.persona, self._waking = persona, None
+        frame_id, self._waking_frame = self._waking_frame, None
         log.info("[timing] persona ready %.2fs after release", time.perf_counter() - self._turn_start)
         self.voice_id = voice_id_for(self.persona.get("voice"))
-        await self.send({"type": "persona", "persona": self.persona})
+        # box is where the object sits in frame frame_id, so the device can pin its AR marker there.
+        await self.send({"type": "persona", "persona": self.persona, "box": persona["box_2d"], "frame_id": frame_id})
         self.memory.log(self.id, "object", self.persona["name"], self.persona)
 
         greeting = self.persona["greeting"]

@@ -1,6 +1,8 @@
 // talk2tech device client: camera + push-to-talk mic -> backend WebSocket -> spoken replies.
 // Message formats: docs/protocol.md
 
+import { arSupported, startAR, captureFrame, placeBox, clearCube, inAR } from "./ar.js";
+
 const $ = (sel) => document.querySelector(sel);
 const video = $("#cam");
 const talkBtn = $("#talk");
@@ -26,6 +28,10 @@ const AUDIO = { echoCancellation: true, noiseSuppression: true };
 const MIC_REOPEN_MS = 400;
 const MAX_CAPTION_LINES = 60;
 const TEXT_HIDE_DELAY_MS = 300;
+const DEBUG = new URLSearchParams(location.search).has("debug");
+const DEBUG_FRAMES_KEPT = 10;
+// Checked up front so the Start tap can go straight into AR without spending its user gesture.
+const arAvailable = arSupported();
 
 let ws;
 let camStream = null;
@@ -39,7 +45,8 @@ let micReopen = null;
 let recorder = null;
 let held = false;
 let recordStart = 0;
-let pressFrame = null;
+let frameCounter = 0;
+const debugFrames = new Map();
 let audioCtx = null;
 let playChain = Promise.resolve();
 let playGen = 0; // bumped on interrupt so queued audio is dropped
@@ -49,12 +56,16 @@ let thingLine = null;
 
 // ---------- startup ----------
 
-$("#start-btn").addEventListener("click", async () => {
+const startBtn = $("#start-btn");
+
+startBtn.addEventListener("click", async () => {
+  if (startBtn.dataset.step === "ar") return enterAR();
   // Must run inside a tap: iOS only unlocks audio playback and camera from a user gesture.
   audioCtx = new (window.AudioContext || window.webkitAudioContext)();
   await audioCtx.resume();
   // Safari keeps the audio session type across reloads; a leftover "playback" blocks the mic.
   setAudioSession("auto");
+  if (await arAvailable) return startWithAR();
   try {
     const stream = await navigator.mediaDevices.getUserMedia({ video: VIDEO, audio: AUDIO });
     useCamera(new MediaStream(stream.getVideoTracks()));
@@ -74,10 +85,50 @@ $("#start-btn").addEventListener("click", async () => {
     }
     if (window.isSecureContext) retryCamera();
   }
+  finishStart();
+});
+
+// AR owns the camera, so only the mic comes from getUserMedia.
+async function startWithAR() {
+  try {
+    useMic(await navigator.mediaDevices.getUserMedia({ audio: AUDIO }));
+    micAllowed = true;
+  } catch (err) {
+    console.warn(err);
+  }
+  // Answering the mic prompt can use up the tap, and entering AR needs a fresh one.
+  if (navigator.userActivation && !navigator.userActivation.isActive) {
+    startBtn.dataset.step = "ar";
+    startBtn.textContent = "Start AR";
+    return;
+  }
+  enterAR();
+}
+
+async function enterAR() {
+  try {
+    await startAR(document.body, { onEnd: leaveAR });
+    document.documentElement.classList.add("ar");
+  } catch (err) {
+    // No ARCore, camera access refused, etc.: carry on with the plain camera view.
+    console.warn("AR unavailable", err);
+    retryCamera();
+  }
+  finishStart();
+}
+
+// The AR session ended (e.g. the system back button): fall back to the plain camera view.
+function leaveAR() {
+  document.documentElement.classList.remove("ar");
+  retryCamera();
+}
+
+function finishStart() {
+  if ($("#start").hidden) return;
   $("#start").hidden = true;
   document.querySelector('meta[name="theme-color"]').content = "#000000";
   connect();
-});
+}
 
 function useCamera(stream) {
   camStream = stream;
@@ -124,7 +175,7 @@ function handle(msg) {
   switch (msg.type) {
     case "hello":
       $("#mode").textContent = `${msg.llm} · ${msg.voice} · memory: ${msg.memory}`;
-      $("#mode").hidden = !new URLSearchParams(location.search).has("debug");
+      $("#mode").hidden = !DEBUG;
       break;
     case "status":
       setStatus(msg.state);
@@ -136,6 +187,10 @@ function handle(msg) {
     case "persona":
       $("#name").textContent = msg.persona.name;
       $("#object").textContent = msg.persona.object;
+      if (msg.box) showBox(msg.box, msg.frame_id);
+      break;
+    case "box":
+      showBox(msg.box, msg.frame_id);
       break;
     case "say":
       if (!thingLine) thingLine = line("thing", "");
@@ -151,6 +206,7 @@ function handle(msg) {
     case "reset":
       $("#name").textContent = PLACEHOLDER.name;
       $("#object").textContent = PLACEHOLDER.object;
+      clearCube();
       captions.replaceChildren();
       captions.classList.remove("scrolled");
       break;
@@ -187,14 +243,52 @@ captions.addEventListener("scroll", () => captions.classList.toggle("scrolled", 
 
 // ---------- camera frames ----------
 
-function grabFrame() {
+// Resolves to { image (b64 JPEG or null), frameId }. The backend echoes frameId with any box it
+// finds, so the box can be matched to the camera pose of the moment the frame was taken.
+async function grabFrame() {
+  const frame = inAR() ? await captureFrame() : grabVideoFrame();
+  if (!frame?.image) return { image: null, frameId: null };
+  if (DEBUG) {
+    debugFrames.set(frame.frameId, frame.image);
+    while (debugFrames.size > DEBUG_FRAMES_KEPT) debugFrames.delete(debugFrames.keys().next().value);
+  }
+  return frame;
+}
+
+function grabVideoFrame() {
   if (!camStream || !video.videoWidth) return null;
   const scale = Math.min(1, MAX_FRAME_SIDE / Math.max(video.videoWidth, video.videoHeight));
   const canvas = document.createElement("canvas");
   canvas.width = Math.round(video.videoWidth * scale);
   canvas.height = Math.round(video.videoHeight * scale);
   canvas.getContext("2d").drawImage(video, 0, 0, canvas.width, canvas.height);
-  return canvas.toDataURL("image/jpeg", 0.7).split(",")[1];
+  return { image: canvas.toDataURL("image/jpeg", 0.7).split(",")[1], frameId: `cam${++frameCounter}` };
+}
+
+// Where Gemini found the object: pin the AR cube there, and with ?debug draw it on the sent frame.
+function showBox(box, frameId) {
+  placeBox(box, frameId);
+  const image = debugFrames.get(frameId);
+  if (!DEBUG || !image) return;
+  const img = new Image();
+  img.onload = () => {
+    const canvas = $("#debug-frame");
+    canvas.width = img.width;
+    canvas.height = img.height;
+    const ctx = canvas.getContext("2d");
+    ctx.drawImage(img, 0, 0);
+    const [ymin, xmin, ymax, xmax] = box;
+    ctx.strokeStyle = "#22ff66";
+    ctx.lineWidth = 4;
+    ctx.strokeRect(
+      (xmin / 1000) * img.width,
+      (ymin / 1000) * img.height,
+      ((xmax - xmin) / 1000) * img.width,
+      ((ymax - ymin) / 1000) * img.height,
+    );
+    canvas.hidden = false;
+  };
+  img.src = `data:image/jpeg;base64,${image}`;
 }
 
 // ---------- push to talk ----------
@@ -280,9 +374,12 @@ async function startRecording(ev) {
   stopSpeech();
   audioCtx?.resume();
   send({ type: "interrupt" });
-  pressFrame = grabFrame(); // the frame from the moment you start talking
-  // Lets a new object start waking up while you're still talking.
-  if (pressFrame) send({ type: "frame", image: pressFrame });
+  // The frame from the moment you start talking, grabbed while the mic comes up.
+  const framing = grabFrame().then((frame) => {
+    // Lets a new object start waking up while you're still talking.
+    if (frame.image) send({ type: "frame", image: frame.image, frame_id: frame.frameId });
+    return frame;
+  });
   talkBtn.classList.add("recording");
   setStatus("listening");
 
@@ -308,7 +405,8 @@ async function startRecording(ev) {
     recorder = null;
     if (tooShort || !chunks.length) return setStatus("idle");
     const blob = new Blob(chunks, { type: chunks[0].type || mime });
-    send({ type: "audio", mime: blob.type, data: await toBase64(blob), image: pressFrame });
+    const [data, frame] = await Promise.all([toBase64(blob), framing]);
+    send({ type: "audio", mime: blob.type, data, image: frame.image, frame_id: frame.frameId });
   };
   recorder.start();
   recordStart = performance.now();
@@ -367,14 +465,15 @@ textForm.addEventListener("focusout", (e) => {
 // Where the browser allows it, keep focus in the input when pressing Send.
 textForm.querySelector("button").addEventListener("mousedown", (e) => e.preventDefault());
 
-textForm.addEventListener("submit", (e) => {
+textForm.addEventListener("submit", async (e) => {
   e.preventDefault();
   const text = textInput.value.trim();
   if (!text) return;
   stopSpeech();
-  send({ type: "text", text, image: grabFrame() });
   textInput.value = "";
   if (!textSticky) textInput.blur(); // dismiss the on-screen keyboard
+  const frame = await grabFrame();
+  send({ type: "text", text, image: frame.image, frame_id: frame.frameId });
 });
 
 // ---------- show text toggle (off by default, remembered per phone) ----------

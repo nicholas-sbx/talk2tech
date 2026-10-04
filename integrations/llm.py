@@ -25,7 +25,14 @@ Reply with JSON only, using exactly these keys:
 - "voice": the best match from this list of keys:
 {voice_menu()}
 - "greeting": the first thing it says on waking up, one or two short sentences
+- "box_2d": where that object is in the photo, as [ymin, xmin, ymax, xmax] integers normalized to 0-1000
 """
+
+
+def locate_prompt(object_name: str) -> str:
+    return f"""Find the {object_name} in this photo.
+Reply with JSON only: {{"box_2d": [ymin, xmin, ymax, xmax]}} as integers normalized to 0-1000,
+or {{"box_2d": null}} if it isn't visible."""
 
 
 def persona_system_prompt(persona: dict) -> str:
@@ -148,6 +155,19 @@ class GeminiLLM:
         ]
         return _normalize_persona(json.loads("".join(parts)))
 
+    async def locate(self, image: bytes, object_name: str) -> list[int] | None:
+        """Where the object is in this frame, as a Gemini box_2d, or None if it can't be seen."""
+        parts = [
+            text
+            async for text in self._stream(
+                "locate",
+                contents=[self._image_part(image), locate_prompt(object_name)],
+                config=self._config(response_mime_type="application/json", temperature=0.0),
+            )
+        ]
+        raw = json.loads("".join(parts))
+        return _normalize_box(raw.get("box_2d") if isinstance(raw, dict) else None)
+
     async def reply_stream(
         self, persona: dict, history: list[dict], user_text: str, image: bytes | None
     ) -> AsyncIterator[str]:
@@ -176,6 +196,9 @@ class GeminiLLM:
             yield text
 
 
+MOCK_BOX = [300, 300, 700, 700]  # the middle of the frame
+
+
 class MockLLM:
     """Canned persona and replies, so the device and voice loop work with no Gemini key."""
 
@@ -189,8 +212,13 @@ class MockLLM:
                 "speaking_style": "Short, dry, world-weary one-liners.",
                 "voice": "gruff_man",
                 "greeting": "Ugh. Who woke me up? I was enjoying being empty.",
+                "box_2d": MOCK_BOX,
             }
         )
+
+    async def locate(self, image: bytes, object_name: str) -> list[int] | None:
+        await asyncio.sleep(0.3)
+        return list(MOCK_BOX)
 
     async def reply_stream(
         self, persona: dict, history: list[dict], user_text: str, image: bytes | None
@@ -210,7 +238,22 @@ def _normalize_persona(raw: dict) -> dict:
         "voice": None,
         "greeting": "Oh! Hello there.",
     }
-    return {k: str(raw.get(k) or v) if v is not None else raw.get(k) for k, v in defaults.items()}
+    persona = {k: str(raw.get(k) or v) if v is not None else raw.get(k) for k, v in defaults.items()}
+    persona["box_2d"] = _normalize_box(raw.get("box_2d"))
+    return persona
+
+
+def _normalize_box(raw) -> list[int] | None:
+    """A valid [ymin, xmin, ymax, xmax] box in 0-1000, or None."""
+    if not isinstance(raw, list) or len(raw) != 4:
+        return None
+    try:
+        ymin, xmin, ymax, xmax = (max(0, min(1000, round(float(v)))) for v in raw)
+    except (TypeError, ValueError):
+        return None
+    if ymax <= ymin or xmax <= xmin:
+        return None
+    return [ymin, xmin, ymax, xmax]
 
 
 def make_llm():

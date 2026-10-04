@@ -36,6 +36,10 @@ html, body {
   background: #000;
 }
 
+/* In WebXR AR the camera is drawn by the browser behind this page (the DOM overlay). */
+html.ar, html.ar body { background: transparent; }
+html.ar #cam { display: none; }
+
 button { font: inherit; color: inherit; cursor: pointer; }
 button:focus-visible { outline: 2px solid var(--fg); outline-offset: 2px; }
 
@@ -157,6 +161,17 @@ body:not(.show-text) .line.thing { display: none; }
 
 .mode { margin-top: 12px; font-size: 11px; color: var(--muted); text-align: center; }
 .mode[hidden] { display: none; }
+
+/* ?debug: the last frame sent to Gemini, with the box it found. */
+.debug-frame {
+  position: fixed;
+  top: calc(var(--safe-top) + 72px);
+  right: 16px;
+  width: 120px;
+  border: 1px solid var(--fg);
+  border-radius: 6px;
+}
+.debug-frame[hidden] { display: none; }
 
 /* ---------- start screen ---------- */
 
