@@ -44,6 +44,7 @@ let playGen = 0; // bumped on interrupt so queued audio is dropped
 let pendingSpeech = 0;
 let currentSource = null;
 let thingLine = null;
+let arManager = null;
 
 // ---------- startup ----------
 
@@ -53,6 +54,20 @@ $("#start-btn").addEventListener("click", async () => {
   await audioCtx.resume();
   // Safari keeps the audio session type across reloads; a leftover "playback" blocks the mic.
   setAudioSession("auto");
+
+  // Initialize AR module with canvas and camera
+  const arCanvas = $("#ar-canvas");
+  if (arCanvas && window.AR) {
+    arCanvas.width = window.innerWidth;
+    arCanvas.height = window.innerHeight;
+    window.addEventListener("resize", () => {
+      arCanvas.width = window.innerWidth;
+      arCanvas.height = window.innerHeight;
+    });
+    arManager = AR.init(arCanvas, video, audioCtx);
+    arManager.start().catch((err) => console.warn("AR start error:", err));
+  }
+
   try {
     const stream = await navigator.mediaDevices.getUserMedia({ video: VIDEO, audio: AUDIO });
     useCamera(new MediaStream(stream.getVideoTracks()));
@@ -135,6 +150,7 @@ function handle(msg) {
     case "persona":
       $("#name").textContent = msg.persona.name;
       $("#object").textContent = msg.persona.object;
+      arManager?.setPersona(msg.persona);
       break;
     case "say":
       if (!thingLine) thingLine = line("thing", "");
@@ -151,6 +167,7 @@ function handle(msg) {
       $("#name").textContent = PLACEHOLDER.name;
       $("#object").textContent = PLACEHOLDER.object;
       captions.replaceChildren();
+      arManager?.reset();
       break;
     case "error":
       line("error", msg.message);
@@ -353,6 +370,7 @@ showTextBtn.addEventListener("click", () => {
 
 $("#reset").addEventListener("click", () => {
   stopSpeech();
+  arManager?.reset();
   send({ type: "reset" });
 });
 
@@ -374,11 +392,15 @@ function enqueueSpeech(text, audioB64) {
     if (gen !== playGen) return;
     const buffer = await decoded;
     if (gen !== playGen) return;
+    arManager?.setSpeaking(true);
     await (buffer ? playBuffer(buffer) : speakLocally(text));
   }).finally(() => {
     if (gen !== playGen) return;
     // Reply finished: reopen the mic so the next press is instant.
-    if (--pendingSpeech === 0) scheduleMicReopen();
+    if (--pendingSpeech === 0) {
+      scheduleMicReopen();
+      arManager?.setSpeaking(false);
+    }
   });
 }
 
@@ -412,6 +434,7 @@ function stopSpeech() {
   pendingSpeech = 0;
   playChain = Promise.resolve();
   scheduleMicReopen();
+  arManager?.setSpeaking(false);
   if (currentSource) {
     try { currentSource.stop(); } catch {}
     currentSource = null;

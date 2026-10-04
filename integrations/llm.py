@@ -13,12 +13,14 @@ log = logging.getLogger(__name__)
 
 RETRYABLE = (429, 500, 503, 504)
 
-BIRTH_PROMPT = f"""Look at this photo and pick the single most prominent physical object in it.
+BIRTH_PROMPT = f"""Look at this photo and pick the single most prominent inanimate physical object in it.
+CRITICAL CONSTRAINT: You MUST select ONLY an inanimate physical object. Do NOT select or anchor to human body parts (hands, fingers, arms, legs, faces, or people). If human hands or people appear in the photo holding or near an item, strictly ignore the human body parts and focus exclusively on the inanimate object itself.
+
 Imagine that object just woke up and can talk. Invent a vivid, funny personality that fits how it
 looks (a cracked mug might be a grumpy veteran, a houseplant a passive-aggressive roommate).
 
 Reply with JSON only, using exactly these keys:
-- "object": what the object is, in a few words
+- "object": what the object is, in a few words (must be an inanimate object, never a human or body part)
 - "name": a short character name
 - "personality": one sentence
 - "speaking_style": one sentence about how it talks
@@ -29,13 +31,14 @@ Reply with JSON only, using exactly these keys:
 
 
 def persona_system_prompt(persona: dict) -> str:
-    return f"""You are {persona['name']}, a {persona['object']} that has come to life.
+    return f"""You are {persona['name']}, an inanimate {persona['object']} that has come to life.
 Personality: {persona['personality']}
 Speaking style: {persona['speaking_style']}
 
 The user is pointing a phone camera at you. The attached image is what the camera sees right now.
 Rules:
 - Stay in character as the object. Never mention being an AI or a model.
+- You are strictly an inanimate object, never a human or human body part.
 - Your words are spoken aloud: no markdown, emoji, lists, or stage directions.
 - Keep each reply to one to three short sentences.
 - If the image shows something new, react to it in character."""
@@ -201,7 +204,26 @@ class MockLLM:
             yield word + " "
 
 
+FORBIDDEN_BODY_PARTS = {
+    "hand", "hands", "finger", "fingers", "thumb", "thumbs",
+    "arm", "arms", "leg", "legs", "foot", "feet", "toe", "toes",
+    "face", "faces", "human", "humans", "person", "people", "man", "woman",
+    "men", "women", "boy", "girl", "child", "children", "baby", "kid", "kids",
+    "body", "palm", "palms", "skin", "head", "heads",
+    "wrist", "wrists", "elbow", "elbows", "knee", "knees",
+    "shoulder", "shoulders", "neck", "necks", "chest", "torso",
+    "forearm", "forearms", "fist", "fists", "knuckle", "knuckles",
+    "fingernail", "fingernails", "nail", "nails", "lip", "lips",
+    "mouth", "mouths", "nose", "noses", "eye", "eyes", "ear", "ears",
+    "cheek", "cheeks", "chin", "chins", "hair", "throat", "ankle", "ankles",
+    "tongue", "tongues", "tooth", "teeth", "belly", "stomach", "thigh", "thighs",
+    "calf", "calves", "guy", "dude", "lady", "gentleman",
+}
+
+
 def _normalize_persona(raw: dict) -> dict:
+    import re
+
     defaults = {
         "object": "thing",
         "name": "Thing",
@@ -210,7 +232,17 @@ def _normalize_persona(raw: dict) -> dict:
         "voice": None,
         "greeting": "Oh! Hello there.",
     }
-    return {k: str(raw.get(k) or v) if v is not None else raw.get(k) for k, v in defaults.items()}
+    normalized = {k: str(raw.get(k) or v) if v is not None else raw.get(k) for k, v in defaults.items()}
+    obj = str(normalized.get("object", "")).lower()
+    name = str(normalized.get("name", "")).lower()
+    clean_text = re.sub(r"[^\w\s]", " ", f"{obj} {name}")
+    words = set(clean_text.split())
+    forbidden_substrings = ("human", "person", "people", "body part", "someone")
+    if words & FORBIDDEN_BODY_PARTS or any(f in obj or f in name for f in forbidden_substrings):
+        log.warning("Detected forbidden body part in persona: object=%r name=%r. Sanitizing to inanimate 'thing'.", obj, name)
+        normalized["object"] = "thing"
+        normalized["name"] = "Thing"
+    return normalized
 
 
 def make_llm():

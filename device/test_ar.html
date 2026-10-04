@@ -1,0 +1,851 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>talk2tech AR Module Headless Unit Tests</title>
+  <style>
+    body { font-family: monospace; background: #0f172a; color: #f8fafc; padding: 20px; }
+    h1 { color: #38bdf8; font-size: 20px; }
+    .summary { font-size: 16px; font-weight: bold; margin: 15px 0; padding: 10px; border-radius: 6px; }
+    .summary.pass { background: #065f46; color: #a7f3d0; }
+    .summary.fail { background: #991b1b; color: #fecaca; }
+    .test { margin: 6px 0; padding: 6px 10px; border-radius: 4px; }
+    .test.pass { background: #1e293b; color: #4ade80; }
+    .test.fail { background: #450a0a; color: #f87171; }
+    canvas { display: none; }
+  </style>
+</head>
+<body>
+  <h1>talk2tech AR Module Unit Tests</h1>
+  <div id="results">Running tests...</div>
+  <canvas id="test-canvas" width="640" height="480"></canvas>
+
+  <script src="vendor/three.min.js"></script>
+  <script src="ar.js"></script>
+  <script>
+    (function () {
+      const resultsEl = document.getElementById("results");
+      const tests = [];
+      let passedCount = 0;
+      let failedCount = 0;
+
+      function assert(condition, message) {
+        if (!condition) {
+          throw new Error(message || "Assertion failed");
+        }
+      }
+
+      function assertClose(actual, expected, tolerance = 0.001, message = "") {
+        if (Math.abs(actual - expected) > tolerance) {
+          throw new Error(`${message}: Expected ~${expected}, got ${actual} (diff: ${Math.abs(actual - expected)})`);
+        }
+      }
+
+      function registerTest(name, fn) {
+        tests.push({ name, fn });
+      }
+
+      // =====================================================================
+      // 1. Scribble Path Generation with 12 FPS Line Boil (R2)
+      // =====================================================================
+
+      registerTest("R2.1: ScribbleFace initializes with 12 FPS line boil configuration", () => {
+        const face = new AR.ScribbleFace();
+        assert(face.boilFPS === 12, "boilFPS must be 12");
+        assertClose(face.boilInterval, 1000 / 12, 0.1, "boilInterval must be ~83.33ms");
+        assert(face.boilTables && face.boilTables.length === 4, "Must pre-generate 4 boil frames");
+      });
+
+      registerTest("R2.2: Line boil frames advance strictly at 12 FPS (~83.3ms)", () => {
+        const face = new AR.ScribbleFace();
+        const start = 1000;
+        face.lastBoilTime = start;
+        face.boilFrame = 0;
+
+        // Advance 40ms: should NOT advance frame yet
+        face.update(start + 40);
+        assert(face.boilFrame === 0, "Boil frame should not advance before 83ms");
+
+        // Advance 85ms: should advance to frame 1
+        face.update(start + 85);
+        assert(face.boilFrame === 1, "Boil frame should advance to 1 at 85ms");
+
+        // Advance through all 4 cycles
+        face.update(start + 85 + 85);
+        assert(face.boilFrame === 2, "Boil frame advances to 2");
+        face.update(start + 85 * 3);
+        assert(face.boilFrame === 3, "Boil frame advances to 3");
+        face.update(start + 85 * 4);
+        assert(face.boilFrame === 0, "Boil frame wraps around to 0");
+      });
+
+      registerTest("R2.3: Line boil provides non-zero geometric perturbations per cycle", () => {
+        const face = new AR.ScribbleFace();
+        face.boilFrame = 0;
+        const b0 = face.getBoil(5);
+        face.boilFrame = 1;
+        const b1 = face.getBoil(5);
+        face.boilFrame = 2;
+        const b2 = face.getBoil(5);
+
+        assert(b0.dx !== b1.dx || b0.dy !== b1.dy, "Boil frame 0 and 1 must differ");
+        assert(b1.dx !== b2.dx || b1.dy !== b2.dy, "Boil frame 1 and 2 must differ");
+      });
+
+      registerTest("R2.4: Reactive lip-sync flapping oscillates when speaking is active", () => {
+        const face = new AR.ScribbleFace();
+        face.speaking = false;
+        face.update(100);
+        assert(face.lipSyncPhase === 0, "Lip-sync phase must be 0 when idle");
+
+        face.speaking = true;
+        face.update(100);
+        const p1 = face.lipSyncPhase;
+        face.update(250);
+        const p2 = face.lipSyncPhase;
+        assert(p1 !== p2, "Lip-sync phase must oscillate during speech");
+      });
+
+      registerTest("R2.5: Panic causes eye bulging and trembling jitter", () => {
+        const face = new AR.ScribbleFace();
+        face.panic = 0;
+        assert(face.panic === 0, "Calm panic should be 0");
+
+        face.panic = 1.0;
+        assert(face.panic === 1.0, "Panic reaches 1.0");
+
+        // Test draw execution does not crash with extreme panic and bulging
+        const canvas = document.createElement("canvas");
+        canvas.width = 200;
+        canvas.height = 200;
+        const ctx = canvas.getContext("2d");
+        face.draw(ctx, 100, 100, 1.0, 500);
+      });
+
+      registerTest("R2.6: Death state switches character to X_X doodle", () => {
+        const face = new AR.ScribbleFace();
+        face.isDead = true;
+
+        const canvas = document.createElement("canvas");
+        canvas.width = 200;
+        canvas.height = 200;
+        const ctx = canvas.getContext("2d");
+        face.draw(ctx, 100, 100, 1.0, 500);
+        assert(face.isDead === true, "Character remains in dead X_X state");
+      });
+
+      // =====================================================================
+      // 2. Human Body Part Avoidance & Skin Locus Filtering (R3)
+      // =====================================================================
+
+      registerTest("R3.1: Skin locus accurately identifies diverse human skin tones", () => {
+        // Fair Caucasian
+        assert(AR.SkinDetector.isSkinPixel(235, 192, 165), "Fair skin should be detected");
+        // East Asian
+        assert(AR.SkinDetector.isSkinPixel(228, 178, 138), "East Asian skin should be detected");
+        // Olive / Mediterranean
+        assert(AR.SkinDetector.isSkinPixel(195, 142, 102), "Olive skin should be detected");
+        // South Asian / Hispanic
+        assert(AR.SkinDetector.isSkinPixel(152, 102, 72), "South Asian skin should be detected");
+        // Dark African
+        assert(AR.SkinDetector.isSkinPixel(102, 65, 48), "Dark African skin should be detected");
+      });
+
+      registerTest("R3.2: Skin locus strictly rejects inanimate physical objects", () => {
+        // Blue ceramic mug
+        assert(!AR.SkinDetector.isSkinPixel(35, 95, 210), "Blue mug must NOT be skin");
+        // Green plant
+        assert(!AR.SkinDetector.isSkinPixel(40, 160, 50), "Green plant must NOT be skin");
+        // Metallic grey laptop
+        assert(!AR.SkinDetector.isSkinPixel(180, 180, 185), "Metallic grey must NOT be skin");
+        // White notebook paper
+        assert(!AR.SkinDetector.isSkinPixel(250, 250, 250), "White paper must NOT be skin");
+        // Black keyboard
+        assert(!AR.SkinDetector.isSkinPixel(25, 25, 25), "Black keyboard must NOT be skin");
+        // Red hardcover book
+        assert(!AR.SkinDetector.isSkinPixel(215, 30, 40), "Red book must NOT be skin");
+        // Yellow post-it note
+        assert(!AR.SkinDetector.isSkinPixel(240, 235, 50), "Yellow post-it must NOT be skin");
+      });
+
+      registerTest("R3.3: Sample pixel buffer neighborhood detection and ratio thresholds", () => {
+        // Create 20x20 sample buffer of skin pixels
+        const skinData = new ImageData(20, 20);
+        for (let i = 0; i < skinData.data.length; i += 4) {
+          skinData.data[i] = 230;     // R
+          skinData.data[i + 1] = 185; // G
+          skinData.data[i + 2] = 155; // B
+          skinData.data[i + 3] = 255; // A
+        }
+        const skinRatio = AR.SkinDetector.sampleSkinRatio(skinData, 10, 10, 8);
+        assertClose(skinRatio, 1.0, 0.05, "100% skin buffer must have ~1.0 ratio");
+        assert(AR.SkinDetector.isSkinArea(skinData, 10, 10, 8, 0.35), "Skin buffer must be detected as skin area");
+
+        // Create 20x20 sample buffer of inanimate object (blue mug)
+        const mugData = new ImageData(20, 20);
+        for (let i = 0; i < mugData.data.length; i += 4) {
+          mugData.data[i] = 30;
+          mugData.data[i + 1] = 80;
+          mugData.data[i + 2] = 210;
+          mugData.data[i + 3] = 255;
+        }
+        const mugRatio = AR.SkinDetector.sampleSkinRatio(mugData, 10, 10, 8);
+        assertClose(mugRatio, 0.0, 0.01, "0% skin buffer must have 0.0 ratio");
+        assert(!AR.SkinDetector.isSkinArea(mugData, 10, 10, 8, 0.35), "Inanimate object must not be flagged as skin");
+      });
+
+      registerTest("R3.4: Rejection triggers comical 'Nope!' reaction pop and sound", () => {
+        const face = new AR.ScribbleFace();
+        assert(face.nopeState === null, "Initial nopeState is null");
+
+        face.triggerNope(150, 200);
+        assert(face.nopeState !== null, "triggerNope sets nopeState");
+        assert(face.nopeState.x === 150 && face.nopeState.y === 200, "nopeState stores coordinates");
+        assert(face.nopeState.duration === 1300, "nopeState duration set");
+
+        // Test rendering comical reaction
+        const canvas = document.createElement("canvas");
+        canvas.width = 300;
+        canvas.height = 300;
+        const ctx = canvas.getContext("2d");
+        face.draw(ctx, -100, -100, 1.0, performance.now() + 100);
+      });
+
+      // =====================================================================
+      // 3. Screen Edge Fear & Proximity Math (R4)
+      // =====================================================================
+
+      registerTest("R4.1: Normalized distance calculation to 4 viewport edges", () => {
+        // Center
+        const center = AR.EdgeFearSystem.computeEdgeDistances(0.5, 0.5);
+        assertClose(center.d, 0.50, 0.001, "Center distance must be 0.5");
+
+        // Near Left edge
+        const nearLeft = AR.EdgeFearSystem.computeEdgeDistances(0.12, 0.5);
+        assertClose(nearLeft.d, 0.12, 0.001, "Near left edge distance must be 0.12");
+        assert(AR.EdgeFearSystem.getNearestEdge(0.12, 0.5) === "left", "Nearest edge is left");
+
+        // Near Right edge
+        const nearRight = AR.EdgeFearSystem.computeEdgeDistances(0.85, 0.5);
+        assertClose(nearRight.d, 0.15, 0.001, "Near right edge distance must be 0.15");
+        assert(AR.EdgeFearSystem.getNearestEdge(0.85, 0.5) === "right", "Nearest edge is right");
+
+        // Near Top edge
+        const nearTop = AR.EdgeFearSystem.computeEdgeDistances(0.5, 0.08);
+        assertClose(nearTop.d, 0.08, 0.001, "Near top edge distance must be 0.08");
+        assert(AR.EdgeFearSystem.getNearestEdge(0.5, 0.08) === "top", "Nearest edge is top");
+
+        // Near Bottom edge
+        const nearBottom = AR.EdgeFearSystem.computeEdgeDistances(0.5, 0.95);
+        assertClose(nearBottom.d, 0.05, 0.001, "Near bottom edge distance must be 0.05");
+        assert(AR.EdgeFearSystem.getNearestEdge(0.5, 0.95) === "bottom", "Nearest edge is bottom");
+      });
+
+      registerTest("R4.2: Panic state enters strictly at d <= 0.22 and escalates to 1.0", () => {
+        // Above boundary: d = 0.30 -> panic = 0
+        assertClose(AR.EdgeFearSystem.computePanic(0.30), 0.0, 0.001, "d > 0.22 must be 0.0 panic");
+        // Boundary: d = 0.22 -> panic = 0
+        assertClose(AR.EdgeFearSystem.computePanic(0.22), 0.0, 0.001, "d = 0.22 must be 0.0 panic");
+        // Mid-panic: d = 0.11 -> panic = 0.5
+        assertClose(AR.EdgeFearSystem.computePanic(0.11), 0.5, 0.001, "d = 0.11 must be 0.5 panic");
+        // At edge: d = 0.0 -> panic = 1.0
+        assertClose(AR.EdgeFearSystem.computePanic(0.0), 1.0, 0.001, "d = 0.0 must be 1.0 panic");
+        // Past edge: d < 0 -> panic = 1.0
+        assertClose(AR.EdgeFearSystem.computePanic(-0.05), 1.0, 0.001, "d < 0 must be 1.0 panic");
+      });
+
+      registerTest("R4.3: Offscreen boundary detection triggers death conditions", () => {
+        assert(!AR.EdgeFearSystem.isOffscreen(0.5, 0.5), "Center is on screen");
+        assert(!AR.EdgeFearSystem.isOffscreen(0.01, 0.99), "Inside borders is on screen");
+
+        assert(AR.EdgeFearSystem.isOffscreen(-0.06, 0.5, 0.05), "Past left edge is offscreen");
+        assert(AR.EdgeFearSystem.isOffscreen(1.06, 0.5, 0.05), "Past right edge is offscreen");
+        assert(AR.EdgeFearSystem.isOffscreen(0.5, -0.06, 0.05), "Past top edge is offscreen");
+        assert(AR.EdgeFearSystem.isOffscreen(0.5, 1.06, 0.05), "Past bottom edge is offscreen");
+      });
+
+      // =====================================================================
+      // 4. Web Audio Procedural Screaming & State Transitions (R4)
+      // =====================================================================
+
+      registerTest("R4.4: Web Audio procedural screaming frequency slides 450 Hz -> 1500 Hz", () => {
+        // Use Mock or Real AudioContext
+        const AudioCtx = window.AudioContext || window.webkitAudioContext;
+        const ctx = AudioCtx ? new AudioCtx() : null;
+        const audio = new AR.ProceduralAudio(ctx);
+
+        assert(audio.state === "idle", "Audio initial state is idle");
+        assert(audio.currentFrequency === 450, "Initial frequency must be 450 Hz");
+
+        // Panic 0.0: calm
+        audio.updatePanic(0.0);
+        assert(audio.state === "idle", "Panic 0 keeps state idle");
+
+        // Panic 0.5: slides to 975 Hz (450 + 1050 * 0.5)
+        audio.updatePanic(0.5);
+        assert(audio.state === "panicking", "State transitions to panicking");
+        assertClose(audio.currentFrequency, 975, 1.0, "Frequency slides to 975 Hz at 0.5 panic");
+
+        // Panic 1.0: slides to 1500 Hz (450 + 1050 * 1.0)
+        audio.updatePanic(1.0);
+        assertClose(audio.currentFrequency, 1500, 1.0, "Frequency slides to 1500 Hz at 1.0 panic");
+
+        // Returning to calm: drops back to idle
+        audio.updatePanic(0.0);
+        assert(audio.state === "idle", "Returns to idle when panic ceases");
+
+        audio.reset();
+      });
+
+      registerTest("R4.5: Web Audio death sequence whistle slide and splat state transition", () => {
+        const AudioCtx = window.AudioContext || window.webkitAudioContext;
+        const ctx = AudioCtx ? new AudioCtx() : null;
+        const audio = new AR.ProceduralAudio(ctx);
+
+        audio.triggerDeathSequence(() => {});
+        assert(audio.state === "falling", "Death sequence transitions immediately to falling state");
+
+        audio.reset();
+        assert(audio.state === "idle", "Reset restores idle state");
+      });
+
+      registerTest("R4.6: Comical Nope sound triggers cartoon rejection squeak without error", () => {
+        const AudioCtx = window.AudioContext || window.webkitAudioContext;
+        const ctx = AudioCtx ? new AudioCtx() : null;
+        const audio = new AR.ProceduralAudio(ctx);
+
+        audio.triggerNopeSound();
+      });
+
+      // =====================================================================
+      // 5. Universal Surface Anchoring & Three.js Fallback (R1)
+      // =====================================================================
+
+      registerTest("R1.1: ARManager initializes cleanly with universal Three.js fallback", () => {
+        const canvas = document.getElementById("test-canvas");
+        const manager = new AR.ARManager(canvas, null);
+
+        assert(manager.mode === "fallback", "Defaults to fallback when WebXR unavailable");
+        assert(manager.isAnchored === false, "Starts unanchored");
+        assert(manager.isDead === false, "Starts alive");
+      });
+
+      registerTest("R1.2: Screen-space projection accurately maps 3D center to screen center", () => {
+        const canvas = document.getElementById("test-canvas");
+        const manager = new AR.ARManager(canvas, null);
+
+        // Center point in 3D camera space: (0, 0, -1.2)
+        const proj = manager.projectToScreen({ x: 0, y: 0, z: -1.2 }, 640, 480);
+        assertClose(proj.u, 0.5, 0.01, "u should project to 0.5");
+        assertClose(proj.v, 0.5, 0.01, "v should project to 0.5");
+        assertClose(proj.x, 320, 5, "x should project to screen center 320px");
+        assertClose(proj.y, 240, 5, "y should project to screen center 240px");
+
+        // Unproject back to 3D
+        const unproj = manager.unprojectFromScreen(0.5, 0.5, -1.2);
+        assertClose(unproj.x, 0, 0.01, "Unprojected x must be ~0");
+        assertClose(unproj.y, 0, 0.01, "Unprojected y must be ~0");
+        assertClose(unproj.z, -1.2, 0.01, "Unprojected z must be -1.2");
+      });
+
+      registerTest("R1.3: Anchoring on inanimate object activates character face tracking", () => {
+        const canvas = document.getElementById("test-canvas");
+        const manager = new AR.ARManager(canvas, null);
+
+        manager.anchorAt(0.5, 0.5);
+        assert(manager.isAnchored === true, "isAnchored should be true");
+        assert(manager.isDead === false, "isDead should be false");
+
+        // Render one frame
+        manager.renderFallbackFrame(100);
+
+        // Reset
+        manager.reset();
+        assert(manager.isAnchored === false, "reset restores unanchored");
+      });
+
+      registerTest("R1.4: Multi-touch pointer tracking ignores secondary fingers during drag", () => {
+        const canvas = document.getElementById("test-canvas");
+        const manager = new AR.ARManager(canvas, null);
+
+        // Finger 1 down at (100, 100)
+        canvas.dispatchEvent(new PointerEvent("pointerdown", { pointerId: 1, clientX: 100, clientY: 100 }));
+        assert(manager.activePointerId === 1, "Primary pointer ID must be 1");
+        assert(manager.isDragging === true, "Dragging active");
+
+        // Finger 2 down at (300, 300) - must be ignored!
+        canvas.dispatchEvent(new PointerEvent("pointerdown", { pointerId: 2, clientX: 300, clientY: 300 }));
+        assert(manager.activePointerId === 1, "Active pointer must remain 1");
+        assert(manager.dragStart.x === 100, "dragStart must not be overwritten by secondary finger");
+
+        // Finger 2 move - must be ignored!
+        window.dispatchEvent(new PointerEvent("pointermove", { pointerId: 2, clientX: 350, clientY: 350 }));
+        assert(manager.dragDistance === 0, "Secondary pointer move must not accumulate drag distance");
+
+        // Finger 1 move
+        window.dispatchEvent(new PointerEvent("pointermove", { pointerId: 1, clientX: 120, clientY: 100 }));
+        assertClose(manager.dragDistance, 20, 0.1, "Primary pointer move must accumulate distance");
+
+        // Finger 1 up
+        window.dispatchEvent(new PointerEvent("pointerup", { pointerId: 1, clientX: 120, clientY: 100 }));
+        assert(manager.activePointerId === null, "Pointer released");
+        assert(manager.isDragging === false, "Dragging stopped");
+      });
+
+      registerTest("R1.5: WebXR view matrix projection accurately maps 3D points via projectXRView", () => {
+        const canvas = document.getElementById("test-canvas");
+        const manager = new AR.ARManager(canvas, null);
+
+        // Mock WebXR view with standard camera projection
+        const mockView = {
+          transform: {
+            inverse: {
+              // Identity matrix
+              matrix: new Float32Array([
+                1, 0, 0, 0,
+                0, 1, 0, 0,
+                0, 0, 1, 0,
+                0, 0, 0, 1
+              ])
+            }
+          },
+          projectionMatrix: new Float32Array([
+            1.732, 0, 0, 0,
+            0, 1.732, 0, 0,
+            0, 0, -1.02, -1,
+            0, 0, -0.2, 0
+          ])
+        };
+
+        const proj = manager.projectXRView({ x: 0, y: 0, z: -1.0 }, mockView, 640, 480);
+        assertClose(proj.u, 0.5, 0.05, "Center 3D point projects to u ~ 0.5");
+        assertClose(proj.v, 0.5, 0.05, "Center 3D point projects to v ~ 0.5");
+      });
+
+      // =====================================================================
+      // 6. Additional Adversarial Edge-Case Verifications
+      // =====================================================================
+
+      registerTest("R2.7: Reactive lip-sync flapping oscillates at speech cadence ~6.5 Hz", () => {
+        const face = new AR.ScribbleFace();
+        face.speaking = true;
+
+        // One full cycle of 6.5 Hz is ~153.8 ms (period T = 1 / 6.5s = 153.85ms)
+        face.update(0);
+        assertClose(Math.sin(face.lipSyncPhase), 0.0, 0.01, "Initial flap is at phase 0");
+
+        // Quarter cycle (~38.5ms): peak flap
+        face.update(38.46);
+        assertClose(Math.sin(face.lipSyncPhase), 1.0, 0.05, "Quarter cycle is peak mouth flap (+1.0)");
+
+        // Half cycle (~76.9ms): return to center
+        face.update(76.92);
+        assertClose(Math.sin(face.lipSyncPhase), 0.0, 0.05, "Half cycle returns to center (~0.0)");
+
+        // Full cycle (~153.85ms): complete oscillation period
+        face.update(153.85);
+        assertClose(Math.sin(face.lipSyncPhase), 0.0, 0.05, "Full cycle completes period (~0.0)");
+      });
+
+      registerTest("R3.5: Skin locus rejects common brown inanimate materials (wood, cardboard)", () => {
+        // Cardboard (tan/brown)
+        assert(!AR.SkinDetector.isSkinPixel(180, 150, 110), "Cardboard must NOT be flagged as skin");
+        // Pine wood (yellowish light brown)
+        assert(!AR.SkinDetector.isSkinPixel(210, 180, 130), "Pine wood must NOT be flagged as skin");
+        // Oak wood (medium brown)
+        assert(!AR.SkinDetector.isSkinPixel(160, 120, 80), "Oak wood must NOT be flagged as skin");
+      });
+
+      registerTest("R3.6: checkSkinAt object-fit: cover mapping safely clamps to video buffer bounds", () => {
+        const canvas = document.getElementById("test-canvas");
+        // Create mock video element with 1920x1080 resolution
+        const video = document.createElement("video");
+        Object.defineProperty(video, "videoWidth", { value: 1920, configurable: true });
+        Object.defineProperty(video, "videoHeight", { value: 1080, configurable: true });
+
+        const manager = new AR.ARManager(canvas, video);
+
+        // Near far right and bottom corner of screen (portrait aspect)
+        const isSkin = manager.checkSkinAt(639, 479, 640, 480);
+        assert(typeof isSkin === "boolean", "checkSkinAt must return boolean without throwing error");
+      });
+
+      registerTest("R4.7: ProceduralAudio reset cancels pending death splat timer to prevent audio mute", (done) => {
+        const AudioCtx = window.AudioContext || window.webkitAudioContext;
+        const ctx = AudioCtx ? new AudioCtx() : null;
+        const audio = new AR.ProceduralAudio(ctx);
+
+        audio.triggerDeathSequence(() => {});
+        assert(audio.state === "falling", "State is falling");
+        assert(audio.deathTimer !== null, "deathTimer is scheduled");
+
+        // Immediately reset
+        audio.reset();
+        assert(audio.state === "idle", "Reset restores idle state");
+        assert(audio.deathTimer === null, "deathTimer must be cleared");
+
+        // Subsequent panic update should work immediately
+        audio.updatePanic(0.5);
+        assert(audio.state === "panicking", "State can panic after reset");
+        audio.reset();
+      });
+
+      registerTest("R4.8: ProceduralAudio resets currentFrequency back to 450 Hz on return to calm", () => {
+        const AudioCtx = window.AudioContext || window.webkitAudioContext;
+        const ctx = AudioCtx ? new AudioCtx() : null;
+        const audio = new AR.ProceduralAudio(ctx);
+
+        audio.updatePanic(1.0);
+        assertClose(audio.currentFrequency, 1500, 1.0, "Frequency is 1500 Hz at 1.0 panic");
+
+        audio.updatePanic(0.0);
+        assertClose(audio.currentFrequency, 450, 1.0, "Frequency must reset to 450 Hz on calm");
+        assert(audio.state === "idle", "State is idle");
+
+        audio.reset();
+      });
+
+      registerTest("R1.6: Screen projection roundtrip under non-zero camera rotations", () => {
+        const canvas = document.getElementById("test-canvas");
+        const manager = new AR.ARManager(canvas, null);
+
+        manager.panAngleX = 0.45;
+        manager.panAngleY = -0.25;
+        manager.gyroPitch = 0.12;
+        manager.gyroRoll = -0.08;
+
+        // Unproject a tap at (0.65, 0.35)
+        const worldPos = manager.unprojectFromScreen(0.65, 0.35, -1.2);
+        // Project back to screen
+        const proj = manager.projectToScreen(worldPos, 640, 480);
+
+        assertClose(proj.u, 0.65, 0.01, "Projected u must match tapped u ~ 0.65 under rotation");
+        assertClose(proj.v, 0.35, 0.01, "Projected v must match tapped v ~ 0.35 under rotation");
+      });
+
+      registerTest("R1.7: Behind-the-camera detection correctly marks 180° points as offscreen", () => {
+        const canvas = document.getElementById("test-canvas");
+        const manager = new AR.ARManager(canvas, null);
+
+        const worldPos = { x: 0, y: 0, z: -1.2 };
+        // Pan 180 degrees away
+        manager.panAngleX = Math.PI;
+
+        const proj = manager.projectToScreen(worldPos, 640, 480);
+        assert(proj.behind === true, "Point behind camera must have behind === true");
+        assert(AR.EdgeFearSystem.isOffscreen(proj.u, proj.v, 0.05, proj.behind), "Point behind camera must be offscreen");
+      });
+
+      registerTest("R1.8: Re-anchoring revives character after panning and offscreen death", () => {
+        const canvas = document.getElementById("test-canvas");
+        const manager = new AR.ARManager(canvas, null);
+
+        manager.anchorAt(0.5, 0.5);
+        assert(manager.isAnchored === true, "Anchored initially");
+
+        // Pan away so character exits screen and dies
+        manager.panAngleX = 1.2;
+        manager.renderFallbackFrame(100);
+        assert(manager.isDead === true, "Character dies after panning offscreen");
+
+        // Now user taps center of current view to re-anchor on new object
+        manager.anchorAt(0.5, 0.5);
+        assert(manager.isDead === false, "Re-anchoring revives character (isDead === false)");
+        assert(manager.face.isDead === false, "Face isDead is false");
+
+        // Render next frame in the panned view
+        manager.renderFallbackFrame(200);
+        assert(manager.isDead === false, "Character stays alive in the new view");
+        assertClose(manager.screenPos.u, 0.5, 0.02, "New anchor is positioned at screen center");
+      });
+
+      registerTest("R2.8: Left and right eyes receive asymmetric line boil seeds", () => {
+        const face = new AR.ScribbleFace();
+        const canvas = document.createElement("canvas");
+        canvas.width = 300;
+        canvas.height = 300;
+        const ctx = canvas.getContext("2d");
+
+        face.draw(ctx, 150, 150, 1.0, 100);
+        const bLeft = face.getBoil(Math.floor(-36) + 0);
+        const bRight = face.getBoil(Math.floor(36) + 17);
+        assert(bLeft.dx !== bRight.dx || bLeft.dy !== bRight.dy, "Asymmetric seeds must yield distinct boil offsets");
+      });
+
+      registerTest("R2.9: Dead face boils mouth and floating stars at 12 FPS", () => {
+        const face = new AR.ScribbleFace();
+        face.isDead = true;
+
+        const b1 = face.getBoil(9);
+        face.boilFrame = 1;
+        const b2 = face.getBoil(9);
+        assert(b1.dx !== b2.dx || b1.dy !== b2.dy, "Dead mouth boil must update across frames");
+      });
+
+      registerTest("R3.7: sampleSkinRatio on multi-region ImageData samples only local neighborhood", () => {
+        // Create 100x100 ImageData:
+        // Top-left 50x50 is skin (230, 185, 155)
+        // Bottom-right 50x50 is blue ceramic (30, 80, 210)
+        const imgData = new ImageData(100, 100);
+        for (let y = 0; y < 100; y++) {
+          for (let x = 0; x < 100; x++) {
+            const idx = (y * 100 + x) * 4;
+            if (x < 50 && y < 50) {
+              imgData.data[idx] = 230;
+              imgData.data[idx + 1] = 185;
+              imgData.data[idx + 2] = 155;
+            } else {
+              imgData.data[idx] = 30;
+              imgData.data[idx + 1] = 80;
+              imgData.data[idx + 2] = 210;
+            }
+            imgData.data[idx + 3] = 255;
+          }
+        }
+
+        const skinRatio = AR.SkinDetector.sampleSkinRatio(imgData, 25, 25, 10);
+        assertClose(skinRatio, 1.0, 0.05, "Top-left skin region must be detected as skin");
+
+        const mugRatio = AR.SkinDetector.sampleSkinRatio(imgData, 75, 75, 10);
+        assertClose(mugRatio, 0.0, 0.05, "Bottom-right ceramic region must be detected as inanimate");
+      });
+
+      registerTest("R3.8: Rejection nope reaction safely handles missing roundRect via fallback", () => {
+        const face = new AR.ScribbleFace();
+        face.triggerNope(100, 100);
+
+        const canvas = document.createElement("canvas");
+        const ctx = canvas.getContext("2d");
+        const origRoundRect = ctx.roundRect;
+        ctx.roundRect = undefined; // Force fallback
+
+        try {
+          face.draw(ctx, 0, 0, 1.0, performance.now() + 50, false);
+        } finally {
+          ctx.roundRect = origRoundRect;
+        }
+      });
+
+      registerTest("R4.9: ProceduralAudio slides oscillator pitch to 450 Hz on return to calm", () => {
+        const AudioCtx = window.AudioContext || window.webkitAudioContext;
+        const ctx = AudioCtx ? new AudioCtx() : null;
+        const audio = new AR.ProceduralAudio(ctx);
+
+        audio.updatePanic(1.0);
+        assert(audio.state === "panicking", "State is panicking");
+        assertClose(audio.currentFrequency, 1500, 1.0, "Frequency is 1500 Hz");
+
+        audio.updatePanic(0.0);
+        assert(audio.state === "idle", "State returned to idle");
+        assertClose(audio.currentFrequency, 450, 1.0, "currentFrequency reset to 450 Hz");
+
+        audio.reset();
+      });
+
+      registerTest("R4.10: setPersona revives a dead character and auto-anchors to new object", () => {
+        const canvas = document.getElementById("test-canvas");
+        const manager = new AR.ARManager(canvas, null);
+
+        manager.isDead = true;
+        manager.face.isDead = true;
+
+        manager.setPersona({ name: "Lamp", object: "desk lamp" });
+        assert(manager.isDead === false, "setPersona must revive character");
+        assert(manager.face.isDead === false, "face.isDead must be false");
+        assert(manager.isAnchored === true, "Character is anchored to new persona");
+      });
+
+      registerTest("R1.9: Points behind camera suppress face rendering to eliminate phantom corner doodle", () => {
+        const canvas = document.createElement("canvas");
+        canvas.width = 640;
+        canvas.height = 480;
+        const manager = new AR.ARManager(canvas, null);
+
+        manager.anchorAt(0.5, 0.5);
+        manager.isDead = true;
+        manager.face.isDead = true;
+
+        // Pan 180 degrees away so point is behind camera
+        manager.panAngleX = Math.PI;
+
+        let drawCalled = false;
+        const origDraw = manager.face.draw;
+        manager.face.draw = function(ctx, cx, cy, scale, now, drawFace) {
+          if (drawFace) drawCalled = true;
+          return origDraw.apply(this, arguments);
+        };
+
+        try {
+          manager.renderFallbackFrame(100);
+          assert(!drawCalled, "Face rendering must be suppressed (drawFace === false) when behind camera");
+        } finally {
+          manager.face.draw = origDraw;
+        }
+      });
+
+      registerTest("R1.10: WebXR projection matrix correctly scales camera-space coordinates during unprojection", () => {
+        const canvas = document.getElementById("test-canvas");
+        const manager = new AR.ARManager(canvas, null);
+        manager.mode = "webxr";
+
+        // Custom WebXR view with non-standard focal length
+        manager.lastXRView = {
+          transform: {
+            matrix: [
+              1, 0, 0, 0,
+              0, 1, 0, 0,
+              0, 0, 1, 0,
+              0, 0, 0, 1
+            ]
+          },
+          projectionMatrix: [
+            2.5, 0, 0, 0,
+            0, 2.0, 0, 0,
+            0, 0, -1, -1,
+            0, 0, -0.2, 0
+          ]
+        };
+
+        const worldPos = manager.unprojectFromScreen(0.75, 0.25, -1.0);
+        // ndcX = (0.75 - 0.5)*2 = 0.5. camX = (0.5 * 1.0) / 2.5 = 0.2
+        // ndcY = -(0.25 - 0.5)*2 = 0.5. camY = (0.5 * 1.0) / 2.0 = 0.25
+        assertClose(worldPos.x, 0.2, 0.01, "Unprojected X matches fx scaling");
+        assertClose(worldPos.y, 0.25, 0.01, "Unprojected Y matches fy scaling");
+        assertClose(worldPos.z, -1.0, 0.01, "Unprojected Z matches target depth");
+      });
+
+      registerTest("R1.11: Touch drag vertical panning direction matches horizontal drag (down drag moves view down)", () => {
+        const canvas = document.getElementById("test-canvas");
+        const manager = new AR.ARManager(canvas, null);
+
+        // Drag down: dy > 0
+        canvas.dispatchEvent(new PointerEvent("pointerdown", { pointerId: 10, clientX: 300, clientY: 200 }));
+        window.dispatchEvent(new PointerEvent("pointermove", { pointerId: 10, clientX: 300, clientY: 250 }));
+        window.dispatchEvent(new PointerEvent("pointerup", { pointerId: 10, clientX: 300, clientY: 250 }));
+
+        assert(manager.panAngleY < 0, "panAngleY decreases on downward drag");
+        const proj = manager.projectToScreen({ x: 0, y: 0, z: -1.2 }, 640, 480);
+        assert(proj.v > 0.5, "Projected vNorm moves down (> 0.5) when dragged down");
+      });
+
+      registerTest("R2.10: Nope reaction face features animate with authentic 12 FPS line boil", () => {
+        const face = new AR.ScribbleFace();
+        face.triggerNope(100, 100);
+
+        face.boilFrame = 0;
+        const b0 = face.getBoil(19);
+        face.boilFrame = 1;
+        const b1 = face.getBoil(19);
+
+        assert(b0.dx !== b1.dx || b0.dy !== b1.dy, "Nope reaction mouth boil must update between boil frames");
+      });
+
+      registerTest("R3.9: sampleSkinRatio near canvas border symmetrically clamps bounding box without over-bleeding", () => {
+        // Create 20x20 ImageData: top-left corner (0..5, 0..5) is skin, rest is blue mug
+        const imgData = new ImageData(20, 20);
+        for (let y = 0; y < 20; y++) {
+          for (let x = 0; x < 20; x++) {
+            const idx = (y * 20 + x) * 4;
+            if (x < 6 && y < 6) {
+              imgData.data[idx] = 230;
+              imgData.data[idx + 1] = 185;
+              imgData.data[idx + 2] = 155;
+            } else {
+              imgData.data[idx] = 30;
+              imgData.data[idx + 1] = 80;
+              imgData.data[idx + 2] = 210;
+            }
+            imgData.data[idx + 3] = 255;
+          }
+        }
+
+        // Sampling at (2, 2) with radius 3: bounding box [0, 5]x[0, 5] should be 100% skin
+        const ratio = AR.SkinDetector.sampleSkinRatio(imgData, 2, 2, 3);
+        assertClose(ratio, 1.0, 0.05, "Tight border neighborhood of skin must report ~1.0 ratio");
+      });
+
+      registerTest("R3.10: Skin detector identifies dark skin under dim ambient illumination", () => {
+        // Dark skin in dim lighting (r=40, g=26, b=18)
+        assert(AR.SkinDetector.isSkinPixel(40, 26, 18), "Dimly lit dark skin should be detected");
+      });
+
+      registerTest("R4.11: triggerDeathSequence silences ongoing scream and resets oscillator frequency to 450 Hz", () => {
+        const AudioCtx = window.AudioContext || window.webkitAudioContext;
+        const ctx = AudioCtx ? new AudioCtx() : null;
+        const audio = new AR.ProceduralAudio(ctx);
+
+        audio.updatePanic(1.0);
+        assertClose(audio.currentFrequency, 1500, 1.0, "Frequency is 1500 Hz during panic");
+
+        audio.triggerDeathSequence(() => {});
+        assertClose(audio.currentFrequency, 450, 1.0, "currentFrequency resets to 450 Hz on death");
+        assert(audio.state === "falling", "State is falling");
+
+        audio.reset();
+      });
+
+      registerTest("R4.12: playSplatSound handles undefined AudioContext sampleRate with 44100 Hz fallback", () => {
+        const mockCtx = {
+          currentTime: 0,
+          sampleRate: undefined, // Simulating environment with undefined sampleRate
+          destination: {},
+          createGain: () => ({
+            gain: { setValueAtTime: () => {}, exponentialRampToValueAtTime: () => {} },
+            connect: () => {},
+          }),
+          createOscillator: () => ({
+            frequency: { setValueAtTime: () => {}, exponentialRampToValueAtTime: () => {} },
+            connect: () => {},
+            start: () => {},
+            stop: () => {},
+          }),
+          createBiquadFilter: () => ({
+            frequency: { setValueAtTime: () => {} },
+            connect: () => {},
+          }),
+          createBuffer: (ch, size, rate) => ({
+            getChannelData: () => new Float32Array(size),
+          }),
+          createBufferSource: () => ({
+            connect: () => {},
+            start: () => {},
+            stop: () => {},
+          }),
+        };
+
+        const audio = new AR.ProceduralAudio(mockCtx);
+        audio.playSplatSound();
+      });
+
+      // =====================================================================
+      // Run All Tests & Dump Output
+      // =====================================================================
+
+      const outputHtml = [];
+
+      for (const t of tests) {
+        try {
+          t.fn();
+          passedCount++;
+          outputHtml.push(`<div class="test pass">[PASS] ${t.name}</div>`);
+        } catch (err) {
+          failedCount++;
+          outputHtml.push(`<div class="test fail">[FAIL] ${t.name}: ${err.message}</div>`);
+          console.error(t.name, err);
+        }
+      }
+
+      const isAllPassed = failedCount === 0;
+      const summaryClass = isAllPassed ? "summary pass" : "summary fail";
+      const summaryText = isAllPassed
+        ? `ALL ${passedCount} UNIT TESTS PASSED SUCCESSFULLY!`
+        : `TEST FAILURES: ${failedCount} FAILED, ${passedCount} PASSED`;
+
+      resultsEl.innerHTML = `
+        <div id="test-summary" class="${summaryClass}">${summaryText}</div>
+        <div id="test-list">${outputHtml.join("")}</div>
+      `;
+    })();
+  </script>
+</body>
+</html>
