@@ -1,7 +1,7 @@
 // AR on phones via the 8th Wall engine (world tracking in plain iOS Safari and Android Chrome),
 // rendered with three.js. 8th Wall owns the camera: it draws the feed, tracks the phone's pose,
 // and gives us the frames we send to Gemini. When Gemini says where the object is in one of those
-// frames, a pulsating green cube is placed on it in the tracked 3D world.
+// frames, a pulsating green slab is laid flat on its surface in the tracked 3D world.
 //
 // 8th Wall engine © Niantic Spatial, Inc., used under the XR Engine License Agreement:
 // https://github.com/8thwall/engine/blob/main/LICENSE
@@ -19,8 +19,18 @@ const CAMERA_HEIGHT = 1.4;
 const FALLBACK_DEPTH = 0.6;
 const CUBE_MIN = 0.03;
 const CUBE_MAX = 0.6;
+const SLAB = 0.25; // thickness, as a fraction of the side: a flattish cube lying on the surface
 const PULSE_HZ = 1.5;
 const FOLLOW = 0.15; // per-frame easing toward a new placement, so re-locating doesn't jump
+const MIN_PLANE_HITS = 4; // fewer hits than this can't give a trustworthy surface angle
+// A new box this close to the current placement (in slab sides) refines it instead of replacing it.
+const SAME_SPOT = 2;
+const RELOCATE_BLEND = 0.5;
+// Between boxes, the surface under the slab is re-checked so it stays on it as tracking refines.
+const REFINE_EVERY = 6; // frames
+const REFINE_GRID = 4; // hit tests per side, spread over the slab's footprint on screen
+const DEPTH_GAIN = 0.3;
+const NORMAL_GAIN = 0.15;
 const DEBUG = new URLSearchParams(location.search).has("debug");
 const CAMERA_FAILURES = {
   DENY_CAMERA: "Camera access was blocked.",
@@ -43,12 +53,16 @@ let captureWaiters = [];
 let reality = null; // this frame's tracking output
 
 // ?debug: what the AR pipeline did, shown on screen since phones have no console.
-const stats = { sent: 0, unreadable: 0, boxes: 0, lastBox: "none yet" };
+const stats = { sent: 0, unreadable: 0, boxes: 0, lastBox: "none yet", refines: 0, lastRefine: "" };
 let statsShown = 0;
 
-let target = null; // where the cube should be (THREE.Vector3)
-let targetSize = 0.1;
+// Where the slab rests: a point on the surface, the surface normal (towards the camera), a
+// direction in the surface for the slab's edges to follow, and its side length.
+let placement = null;
+let targetPosition = null;
+let targetQuaternion = null;
 let size = 0.1;
+let updates = 0; // frames since start, to space out surface re-checks
 
 // World tracking needs a phone's camera and motion sensors.
 export function arSupported() {
@@ -156,45 +170,159 @@ export function placeBox(box, frameId) {
   }
   const [ymin, xmin, ymax, xmax] = box;
 
-  // How far away the object is: tracked feature points that land inside the box, as seen from the
-  // camera when the frame was taken; failing that, the estimated surfaces under the box.
+  // Hits that land in the middle of the box, as seen from the camera when the frame was taken.
   const cy = (ymin + ymax) / 2;
   const cx = (xmin + xmax) / 2;
   const halfH = ((ymax - ymin) / 2) * BOX_CORE;
   const halfW = ((xmax - xmin) / 2) * BOX_CORE;
-  const inBox = (p) => Math.abs(p.y - cy) <= halfH && Math.abs(p.x - cx) <= halfW;
-  const depthsIn = (points) => points.map((p) => project(p, snap)).filter((p) => p && inBox(p)).map((p) => p.depth);
-  const fromPoints = depthsIn(snap.points);
-  const fromSurfaces = depthsIn(snap.surfaces);
-  const depth = median(fromPoints) ?? median(fromSurfaces) ?? FALLBACK_DEPTH;
-  const source = fromPoints.length
-    ? `${fromPoints.length}/${snap.points.length} feature hits`
-    : fromSurfaces.length
-      ? `${fromSurfaces.length}/${snap.surfaces.length} surface hits`
-      : `no hits in box (${snap.points.length} feature, ${snap.surfaces.length} surface), fixed depth`;
+  const inBox = (hit) => {
+    const at = project(hit.point, snap);
+    return at && Math.abs(at.y - cy) <= halfH && Math.abs(at.x - cx) <= halfW ? { ...hit, depth: at.depth } : null;
+  };
+  const features = snap.points.map(inBox).filter(Boolean);
+  const surfaces = snap.surfaces.map(inBox).filter(Boolean);
 
-  // Ray from the camera through the centre of the box, out to that depth.
+  // Ray from the camera through the centre of the box.
   const ndc = new THREE.Vector3(cx / 500 - 1, 1 - cy / 500, -1).applyMatrix4(snap.projectionInverse);
   const dirCamera = ndc.normalize();
-  const along = depth / -dirCamera.z;
   const origin = new THREE.Vector3().setFromMatrixPosition(snap.cameraToWorld);
   const dir = dirCamera.clone().transformDirection(snap.cameraToWorld);
 
-  // Real-world size of the box at that depth; the cube matches its smaller side.
+  // How far away the object is (feature points on it, else the surfaces under it), and which way
+  // its surface faces (a plane through those points, else the surface's own normal, else facing
+  // the camera).
+  const used = features.length ? features : surfaces;
+  const depth = median(used.map((h) => h.depth)) ?? FALLBACK_DEPTH;
+  const plane = fitPlane(features.map((h) => h.point));
+  let normal;
+  let source;
+  if (plane) {
+    normal = plane.normal;
+    source = `${features.length} feature hits, fitted plane`;
+  } else if (surfaces.length && !features.length) {
+    normal = surfaces.reduce((sum, h) => sum.add(h.normal), new THREE.Vector3()).normalize();
+    source = `${surfaces.length} surface hits`;
+  } else {
+    normal = dir.clone().negate();
+    source = used.length ? `${used.length} feature hits, facing camera` : "no hits in box, fixed depth";
+  }
+  const point = origin.clone().addScaledVector(dir, depth / -dirCamera.z);
+  if (normal.dot(origin.clone().sub(point)) < 0) normal.negate();
+
+  // Real-world size of the box at that depth; the slab matches its smaller side.
   const p = snap.projection.elements;
   const width = ((xmax - xmin) / 500) * (depth / p[0]);
   const height = ((ymax - ymin) / 500) * (depth / p[5]);
-  targetSize = THREE.MathUtils.clamp(Math.min(width, height), CUBE_MIN, CUBE_MAX);
+  const side = THREE.MathUtils.clamp(Math.min(width, height), CUBE_MIN, CUBE_MAX);
+  const right = new THREE.Vector3(1, 0, 0).transformDirection(snap.cameraToWorld);
 
-  // The points are on the object's front surface: sit the cube's centre inside it.
-  target = origin.addScaledVector(dir, along + targetSize / 2);
+  // Same object again (a later turn): nudge the slab rather than jumping to a noisier estimate.
+  if (placement && placement.point.distanceTo(point) < SAME_SPOT * Math.max(side, placement.size)) {
+    placement.point.lerp(point, RELOCATE_BLEND);
+    placement.normal.lerp(normal, RELOCATE_BLEND).normalize();
+    placement.size += (side - placement.size) * RELOCATE_BLEND;
+    source += ", blended";
+  } else {
+    placement = { point, normal, right, size: side };
+  }
+  aimSlab();
+
   const fmt = (v) => v.toArray().map((n) => n.toFixed(2)).join(", ");
-  stats.lastBox = `${frameId}: depth ${depth.toFixed(2)} (${source}), cube ${targetSize.toFixed(2)} at ${fmt(target)}, camera was at ${fmt(new THREE.Vector3().setFromMatrixPosition(snap.cameraToWorld))}`;
+  stats.lastBox = `${frameId}: depth ${depth.toFixed(2)} (${source}), side ${side.toFixed(2)}, normal ${fmt(placement.normal)}`;
 }
 
 export function clearCube() {
-  target = null;
+  placement = null;
+  targetPosition = null;
   if (cube) cube.visible = false;
+}
+
+// Turns the placement into the slab's pose: lying on the surface, its face along the normal and
+// its edges lined up with `right` (the camera's sideways direction when it was placed).
+function aimSlab() {
+  const { point, normal, right } = placement;
+  let x = right.clone().addScaledVector(normal, -right.dot(normal));
+  if (x.lengthSq() < 1e-6) x = new THREE.Vector3(0, 0, 1).cross(normal);
+  x.normalize();
+  const z = x.clone().cross(normal);
+  targetQuaternion = new THREE.Quaternion().setFromRotationMatrix(new THREE.Matrix4().makeBasis(x, normal, z));
+  targetPosition = point.clone().addScaledVector(normal, (placement.size * SLAB) / 2);
+}
+
+// Re-checks the surface under the slab with a few hit tests around where it appears on screen,
+// and eases the slab's depth and angle onto it. Only depth along the line of sight is corrected:
+// sideways position comes from Gemini's boxes.
+function refineOnSurface(camera) {
+  if (!placement || reality?.trackingStatus !== "NORMAL") return;
+  camera.updateMatrixWorld();
+  const centre = placement.point.clone().project(camera);
+  if (centre.z > 1 || Math.abs(centre.x) > 0.9 || Math.abs(centre.y) > 0.9) return; // off screen
+
+  const eye = new THREE.Vector3().setFromMatrixPosition(camera.matrixWorld);
+  const toPoint = placement.point.clone().sub(eye);
+  const distance = toPoint.length();
+  const sight = toPoint.normalize();
+
+  // The slab's half-width on screen, in hit-test units (0-1 across the canvas).
+  const side = new THREE.Vector3(1, 0, 0).transformDirection(camera.matrixWorld);
+  const edge = placement.point.clone().addScaledVector(side, placement.size / 2).project(camera);
+  const rx = THREE.MathUtils.clamp(Math.abs(edge.x - centre.x) / 2, 0.01, 0.2);
+  const ry = rx * (canvas.width / canvas.height);
+  const sx = (centre.x + 1) / 2;
+  const sy = (1 - centre.y) / 2;
+
+  // Keep hits near the line of sight to the slab, within a broad range of depths (so a bad first
+  // guess can still converge).
+  const reach = placement.size + 0.02;
+  const hits = [];
+  for (let gy = 0; gy < REFINE_GRID; gy++) {
+    for (let gx = 0; gx < REFINE_GRID; gx++) {
+      const x = sx + (((gx + 0.5) / REFINE_GRID) * 2 - 1) * rx;
+      const y = sy + (((gy + 0.5) / REFINE_GRID) * 2 - 1) * ry;
+      for (const hit of XR8.XrController.hitTest(x, y, ["FEATURE_POINT"])) {
+        const at = new THREE.Vector3(hit.position.x, hit.position.y, hit.position.z);
+        const along = at.clone().sub(eye).dot(sight);
+        const off = at.clone().sub(eye).addScaledVector(sight, -along).length();
+        if (off < reach && along > distance * 0.3 && along < distance * 3) hits.push({ at, along });
+      }
+    }
+  }
+  if (!hits.length) return;
+
+  const along = median(hits.map((h) => h.along));
+  placement.point = eye.clone().addScaledVector(sight, distance + (along - distance) * DEPTH_GAIN);
+  const plane = fitPlane(hits.map((h) => h.at));
+  if (plane) {
+    if (plane.normal.dot(sight) > 0) plane.normal.negate();
+    placement.normal.lerp(plane.normal, NORMAL_GAIN).normalize();
+  }
+  stats.refines++;
+  stats.lastRefine = `${hits.length} hits${plane ? ", plane" : ""}`;
+  aimSlab();
+}
+
+// Least-squares plane through some points: their centroid and the unit normal, or null if there
+// are too few or they're all in a line.
+function fitPlane(points) {
+  if (points.length < MIN_PLANE_HITS) return null;
+  const c = points.reduce((sum, v) => sum.add(v), new THREE.Vector3()).divideScalar(points.length);
+  let xx = 0, xy = 0, xz = 0, yy = 0, yz = 0, zz = 0;
+  for (const v of points) {
+    const x = v.x - c.x, y = v.y - c.y, z = v.z - c.z;
+    xx += x * x; xy += x * y; xz += x * z;
+    yy += y * y; yz += y * z; zz += z * z;
+  }
+  // Solve with the axis that's least parallel to the plane, for the best-conditioned answer.
+  const detX = yy * zz - yz * yz;
+  const detY = xx * zz - xz * xz;
+  const detZ = xx * yy - xy * xy;
+  const best = Math.max(detX, detY, detZ);
+  if (best <= 1e-12) return null;
+  const normal =
+    best === detX ? new THREE.Vector3(detX, xz * yz - xy * zz, xy * yz - xz * yy)
+    : best === detY ? new THREE.Vector3(xz * yz - xy * zz, detY, xy * xz - yz * xx)
+    : new THREE.Vector3(xy * yz - xz * yy, xy * xz - yz * xx, detZ);
+  return { centroid: c, normal: normal.normalize() };
 }
 
 // A world point as seen from a snapshot's camera: box coordinates (0-1000) and depth, or null if
@@ -283,7 +411,7 @@ function showStats() {
   const el = document.getElementById("ar-debug");
   if (!el) return;
   const tracking = reality ? `${reality.trackingStatus} ${reality.trackingReason}` : "no tracking yet";
-  const cubeState = target ? (cube?.visible ? "shown" : "placed") : "not placed";
+  const cubeState = placement ? `shown, ${stats.refines} surface re-checks (last: ${stats.lastRefine || "none"})` : "not placed";
   el.textContent = [
     `tracking: ${tracking}`,
     `frames sent: ${stats.sent}, unreadable: ${stats.unreadable}, boxes: ${stats.boxes}`,
@@ -310,8 +438,14 @@ function snapshot() {
         "DETECTED_SURFACE",
       ]);
       for (const hit of hits) {
-        const at = new THREE.Vector3(hit.position.x, hit.position.y, hit.position.z);
-        (hit.type === "FEATURE_POINT" ? points : surfaces).push(at);
+        const point = new THREE.Vector3(hit.position.x, hit.position.y, hit.position.z);
+        if (hit.type === "FEATURE_POINT") {
+          points.push({ point });
+        } else {
+          const { x, y, z, w } = hit.rotation;
+          const normal = new THREE.Vector3(0, 1, 0).applyQuaternion(new THREE.Quaternion(x, y, z, w));
+          surfaces.push({ point, normal });
+        }
       }
     }
   }
@@ -359,14 +493,18 @@ function sceneModule() {
         scene.add(marker);
       }
     },
-    onUpdate: () => animateCube(performance.now()),
+    onUpdate: () => {
+      if (++updates % REFINE_EVERY === 0) refineOnSurface(XR8.Threejs.xrScene().camera);
+      animateCube(performance.now());
+    },
   };
 }
 
 // ---------- the cube ----------
 
 function makeCube() {
-  const geometry = new THREE.BoxGeometry(1, 1, 1);
+  // Unit side, flattened: its local Y is the surface normal.
+  const geometry = new THREE.BoxGeometry(1, SLAB, 1);
   cubeFill = new THREE.MeshStandardMaterial({
     color: 0x22ff66,
     emissive: 0x22ff66,
@@ -386,19 +524,20 @@ function makeCube() {
 }
 
 function animateCube(time) {
-  if (!target) return;
+  if (!targetPosition) return;
   if (!cube.visible) {
-    cube.position.copy(target);
-    size = targetSize;
+    cube.position.copy(targetPosition);
+    cube.quaternion.copy(targetQuaternion);
+    size = placement.size;
     cube.visible = true;
   } else {
-    cube.position.lerp(target, FOLLOW);
-    size += (targetSize - size) * FOLLOW;
+    cube.position.lerp(targetPosition, FOLLOW);
+    cube.quaternion.slerp(targetQuaternion, FOLLOW);
+    size += (placement.size - size) * FOLLOW;
   }
   const seconds = time / 1000;
   const pulse = Math.sin(seconds * 2 * Math.PI * PULSE_HZ);
-  cube.scale.setScalar(size * (1 + 0.12 * pulse));
-  cube.rotation.y = seconds * 0.6;
+  cube.scale.setScalar(size * (1 + 0.08 * pulse));
   cubeFill.emissiveIntensity = 0.6 + 0.4 * pulse;
   cubeFill.opacity = 0.35 + 0.15 * pulse;
 }

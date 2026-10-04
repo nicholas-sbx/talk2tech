@@ -32,10 +32,12 @@ it, and attaches it to that turn. It feels live and costs far less than streamin
 
 On phones the 8th Wall engine owns the camera (`device/ar.js`): it draws the feed, tracks the phone in
 3D, and three.js renders over it. Frames for Gemini are read from that canvas, and for each one the
-device keeps the camera pose and the 3D feature points it can see, keyed by `frame_id`. Gemini returns
-the object's `box_2d` with the persona and again (via a parallel `locate` call) on every later turn.
-The device takes the median depth of the tracked points inside the box, as seen from the saved pose,
-and places a pulsing cube there. Desktop browsers keep the plain camera view.
+device keeps the camera pose and a grid of hit tests (3D points on what's in view), keyed by
+`frame_id`. Gemini returns the object's `box_2d` with the persona and again (via a parallel `locate`
+call) on every later turn. The hits that fall inside the box, as seen from the saved pose, give the
+object's depth (their median) and its surface angle (a plane fitted through them), and a flat,
+pulsing slab is laid on that surface. A few times a second the device re-checks the surface under the
+slab and eases onto it, which keeps drift down. Desktop browsers keep the plain camera view.
 
 ## Mock mode
 
