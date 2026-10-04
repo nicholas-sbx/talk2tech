@@ -41,6 +41,7 @@ class Session:
         # Persona generation started early, from the frame sent when the talk button is pressed.
         self._waking: asyncio.Task | None = None
         self._waking_frame: str | None = None  # frame_id of the image the persona is made from
+        self._waking_heard = False  # whether the persona is being made with the user's words
         # Re-finds the object in each turn's frame so the device can re-anchor its AR marker.
         self._locating: asyncio.Task | None = None
         self._turn_start = 0.0
@@ -107,6 +108,7 @@ class Session:
                 self.llm.make_persona(image, focus, user_text, audio_tags=self.voice.supports_tags)
             )
             self._waking_frame = frame_id if image else None
+            self._waking_heard = bool(user_text)  # so its greeting answers them
 
     def _cancel_waking(self) -> None:
         if self._waking:
@@ -225,19 +227,21 @@ class Session:
             speech.put_nowait((clean_for_speech(spoken), task))
 
         try:
+            answered = False
             if self.persona is None:
-                await self._birth(image, frame_id, lambda s: say(s, record=False), focus, user_text)
+                answered = await self._birth(image, frame_id, say, focus, user_text)
 
-            await self.status("thinking")
-            model, words = await self.llm.reply_stream(self.persona, self.history, user_text, image, audio_tags=tags)
-            await self.send({"type": "model", "model": model})
-            buffer = ""
-            async for delta in words:
-                buffer += delta
-                sentences, buffer = pop_sentences(buffer)
-                for s in sentences:
-                    say(s)
-            say(buffer)
+            if not answered:
+                await self.status("thinking")
+                model, words = await self.llm.reply_stream(self.persona, self.history, user_text, image, audio_tags=tags)
+                await self.send({"type": "model", "model": model})
+                buffer = ""
+                async for delta in words:
+                    buffer += delta
+                    sentences, buffer = pop_sentences(buffer)
+                    for s in sentences:
+                        say(s)
+                say(buffer)
 
             speech.put_nowait(None)
             await speaker
@@ -258,12 +262,16 @@ class Session:
 
     async def _birth(
         self, image: bytes | None, frame_id: str | None, say, focus: str | None = None, user_text: str | None = None
-    ) -> None:
-        """First sight of an object: identify it and give it a personality and voice."""
+    ) -> bool:
+        """First sight of an object: identify it and give it a personality and voice.
+
+        Returns True if its greeting already answered the user, so the turn needs no separate reply.
+        """
         await self.status("waking")
         # No-op if the button press already started it, in which case the persona is made without the
         # user's words: restarting it to include them would cost more wait than it's worth.
         self._start_waking(image, frame_id, focus, user_text)
+        heard = self._waking_heard
         try:
             # Shielded so an interrupted turn doesn't throw away a persona that's nearly ready.
             persona = await asyncio.shield(self._waking)
@@ -280,11 +288,14 @@ class Session:
         await self.send({"type": "persona", "persona": self.persona, "box": persona["box_2d"], "frame_id": frame_id})
         self.memory.log(self.id, "object", self.persona["name"], self.persona)
 
-        greeting = self.persona["greeting"]
-        sentences, rest = pop_sentences(greeting + " ")
+        # A greeting written without the user's words can't answer them, so it's skipped for a real
+        # reply rather than said first: the user should hear the answer to what they asked, not a preamble.
+        if not heard:
+            return False
+        sentences, rest = pop_sentences(self.persona["greeting"] + " ")
         for s in sentences + ([rest.strip()] if rest.strip() else []):
             say(s)
-        self.history.append({"role": "model", "text": clean_for_speech(greeting, keep_tags=self.voice.supports_tags)})
+        return True
 
     async def _speak_in_order(self, speech: asyncio.Queue) -> None:
         """Send sentences to the device in order, as soon as each one's audio is ready."""

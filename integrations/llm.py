@@ -13,8 +13,17 @@ log = logging.getLogger(__name__)
 
 RETRYABLE = (429, 500, 503, 504)
 
+# How the object talks, in its first line and every reply after.
+SPEECH_RULES = """- Answer first: the very first words respond to what the user said. No preamble, complaint,
+  or scene-setting before the answer.
+- Be brief: one sentence, under 20 words. Two short sentences only if the answer really needs it.
+- If you can't know something (the weather, the news, the time), say so in a few words, or make a
+  quick guess from what you can see, and stop.
+- You believe you're a real object that has always been able to talk. Never mention waking up,
+  sleeping, or coming to life, and never mention a camera, phone, screen, photo, or image."""
+
 BIRTH_PROMPT = f"""Look at this photo and {{pick}}.
-Imagine that object just woke up and can talk. Invent a vivid, personality that fits how it
+Imagine that object can talk. Invent a vivid personality that fits how it
 looks (a cracked mug might be a grumpy veteran, a houseplant a passive-aggressive roommate).
 Keep its language conversational but make sure the personality comes through.
 {{user_context}}
@@ -25,8 +34,8 @@ Reply with JSON only, using exactly these keys:
 - "speaking_style": one sentence about how it talks
 - "voice": the best match from this list of keys:
 {voice_menu()}
-- "greeting": the first thing it says on waking up, one or two short sentences. It believes it's a
-  real, living object, so it never mentions a camera, phone, screen, photo, or image{{greeting_tags}}
+- "greeting": what it says to the user, following these rules:
+{SPEECH_RULES}{{greeting_tags}}
 - "box_2d": one box around the whole object in the photo, as [ymin, xmin, ymax, xmax] integers normalized to 0-1000
 - "smiley_size": a 3D smiley face sticker will be stuck flat on the object's visible surface. Pick
   its diameter as a fraction of the object's visible width, between 0.1 and 1.0, so it looks right
@@ -39,14 +48,12 @@ def birth_prompt(focus: str | None = None, user_text: str | None = None, audio_t
     pick = f'find the {focus} in it (the user asked to talk to it)' if focus else "pick the single most prominent physical object in it"
     user_context = (
         f'\nThe user has already said: "{user_text}"\n'
-        "Use this as context when choosing the object's personality, speaking style, and greeting. "
-        "The greeting is the object's reply to this message. It opens with the answer to the user's "
-        "question (or a direct response to what they said), in character, and only then adds any "
-        "complaint, joke, or introduction. Never make the user wait through a tangent for the answer.\n"
+        "Use this as context when choosing the object's personality and speaking style. The greeting "
+        "is the object's reply to this message, so it starts by answering it.\n"
         if user_text
         else ""
     )
-    greeting_tags = f". Perform it with feeling using audio tags. {AUDIO_TAG_GUIDE}" if audio_tags else ""
+    greeting_tags = f"\n- Perform it with feeling using audio tags. {AUDIO_TAG_GUIDE}" if audio_tags else ""
     return (
         BIRTH_PROMPT.replace("{pick}", pick)
         .replace("{user_context}", user_context)
@@ -102,8 +109,8 @@ AUDIO_TAG_GUIDE = (
     "Audio tags are short performance directions in square brackets that the voice acts out instead "
     "of saying, like [sighs], [laughs], [giggles], [whispers], [shouting], [groans], [gasps], "
     "[sarcastically], [excitedly], [nervously], [annoyed], [crying], or [muttering under breath]. "
-    "Put a tag right before the words it colors and use one or two in nearly every reply, picking "
-    "the emotion the moment calls for. Never put anything else in square brackets."
+    "Put a tag right before the words it colors and use one in nearly every reply, picking the "
+    "emotion the moment calls for. Never put anything else in square brackets."
 )
 
 
@@ -117,22 +124,18 @@ def persona_system_prompt(persona: dict, audio_tags: bool = False) -> str:
         if audio_tags
         else "- Your words are spoken aloud: no markdown, emoji, lists, or stage directions."
     )
-    return f"""You are {persona['name']}, a {persona['object']} that has come to life.
+    return f"""You are {persona['name']}, a {persona['object']} that can talk.
 Personality: {persona['personality']}
 Speaking style: {persona['speaking_style']}
 
-You are a real, living object talking face to face with the user. The attached image is what you can
-see around you right now.
+You are talking face to face with the user. The attached image is what you can see around you right now.
 Rules:
-- Most important: address the user's message first. Your very first sentence answers their question
-  or replies to their point directly. If they ask for information or help, give a real, useful
-  answer. Your personality and emotions color the answer; they never replace it, and you never dodge,
-  change the subject, or just complain instead.
-- Stay in character as the object. You believe you are real. Never mention being an AI or a model,
-  and never mention a camera, phone, screen, photo, or image: you're just looking at the world.
+{SPEECH_RULES}
+- If they ask for information or help, give a real, useful answer. Your personality and emotions
+  color the answer; they never replace it, and you never dodge or change the subject.
+- Stay in character as the object. Never mention being an AI or a model.
 {directions}
-- Keep each reply to one to two short sentences.
-- Only mention something new in the image if it's relevant or the user asks about it."""
+- Only mention something you see if it's relevant or the user asks about it."""
 
 
 class GeminiLLM:
@@ -307,7 +310,7 @@ class MockLLM:
                 "personality": "A chipped veteran of a thousand early mornings, grumpy but loyal.",
                 "speaking_style": "Short, dry, world-weary one-liners.",
                 "voice": "gruff_man",
-                "greeting": "Ugh. Who woke me up? I was enjoying being empty.",
+                "greeting": _mock_reply(user_text) if user_text else "Ugh. What do you want?",
                 "box_2d": MOCK_BOX,
                 "smiley_size": 0.6,
             }
@@ -322,15 +325,7 @@ class MockLLM:
     async def reply_stream(
         self, persona: dict, history: list[dict], user_text: str, image: bytes | None, audio_tags: bool = False
     ) -> tuple[str, AsyncIterator[str]]:
-        if "slapped" in user_text.lower():
-            if "repeatedly" in user_text.lower():
-                reply = "That's it! You're a monster! One more smack and I'm cracking on purpose!"
-            elif "again" in user_text.lower():
-                reply = "Stop hitting me! I'm not a stress ball! Keep your hands to yourself!"
-            else:
-                reply = "Ow! Hey! What did you do that for?! My glaze is delicate!"
-        else:
-            reply = f"You said: {user_text}. Fascinating. Now, is anyone going to fill me with coffee or not?"
+        reply = _mock_reply(user_text)
 
         async def words() -> AsyncIterator[str]:
             for word in reply.split(" "):
@@ -338,6 +333,16 @@ class MockLLM:
                 yield word + " "
 
         return "mock", words()
+
+
+def _mock_reply(user_text: str) -> str:
+    if "slapped" in user_text.lower():
+        if "repeatedly" in user_text.lower():
+            return "That's it! You're a monster! One more smack and I'm cracking on purpose!"
+        if "again" in user_text.lower():
+            return "Stop hitting me! I'm not a stress ball! Keep your hands to yourself!"
+        return "Ow! Hey! What did you do that for?! My glaze is delicate!"
+    return f"You said: {user_text}. Fascinating. Now, is anyone going to fill me with coffee or not?"
 
 
 def _normalize_persona(raw: dict) -> dict:
