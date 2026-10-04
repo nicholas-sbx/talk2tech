@@ -16,7 +16,7 @@ from integrations.voice import make_voice
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
-app = FastAPI(title="talk2tech")
+app = FastAPI(title="TalkTua")
 llm = make_llm()
 voice = make_voice()
 memory = make_memory()

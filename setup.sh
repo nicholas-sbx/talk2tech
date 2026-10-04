@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Set up talk2tech without starting it: create .venv, install dependencies, and create .env.
+# Set up TalkTua without starting it: create .venv, install dependencies, and create .env.
 # Safe to run repeatedly; dependencies are reinstalled only when requirements.txt changes.
 # Usage:  ./setup.sh
 set -euo pipefail

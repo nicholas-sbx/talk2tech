@@ -1,15 +1,15 @@
-# Named Cloudflare tunnel for talk2tech (backend serves the device client + /ws on one port).
+# Named Cloudflare tunnel for TalkTua (backend serves the device client + /ws on one port).
 # One-time setup, run from the repo root:
 #   cloudflared tunnel login
-#   cloudflared tunnel create talk2tech
+#   cloudflared tunnel create talktua
 #   copy the printed ~/.cloudflared/<TUNNEL_ID>.json to cloudflared/credentials.json (gitignored)
-#   cloudflared tunnel route dns talk2tech talk2tech.example.com
+#   cloudflared tunnel route dns talktua talktua.example.com
 # Run:
 #   cloudflared tunnel --config cloudflared/config.yml run
-tunnel: talk2tech
+tunnel: talktua
 credentials-file: cloudflared/credentials.json
 
 ingress:
-  - hostname: talk2tech.example.com
+  - hostname: talktua.example.com
     service: http://localhost:8000
   - service: http_status:404

@@ -1,4 +1,4 @@
-# talk2tech
+# TalkTua
 
 Point your phone at any object and talk to it. It wakes up with its own personality and voice and
 talks back, in character, about what it sees.

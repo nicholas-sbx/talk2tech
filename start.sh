@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Launch the talk2tech backend (which also serves the mobile client).
+# Launch the TalkTua backend (which also serves the mobile client).
 # Usage:  ./start.sh [--port 8000] [--mock] [--tunnel]
 #   --mock    run every service in mock mode (no API keys needed)
 #   --tunnel  also open an HTTPS tunnel with cloudflared so a phone can use the camera and mic
@@ -32,5 +32,5 @@ if [[ $TUNNEL == 1 ]]; then
   trap 'kill $!' EXIT
 fi
 
-echo "talk2tech running at http://localhost:$PORT"
+echo "TalkTua running at http://localhost:$PORT"
 "$PY" -m uvicorn backend.main:app --host 0.0.0.0 --port "$PORT" --reload
