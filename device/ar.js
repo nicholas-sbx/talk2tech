@@ -19,6 +19,9 @@ const CAMERA_HEIGHT = 1.4;
 const FALLBACK_DEPTH = 0.6;
 const SMILEY_MIN = 0.02; // diameter limits, in scene units (about metres)
 const SMILEY_MAX = 0.8;
+// Never smaller than this share of its distance (about a sixth of the screen's width), so it can't
+// shrink to a speck on a thin object.
+const SMILEY_MIN_VIEW = 0.1;
 // Gemini picks the smiley's diameter as a share of the object's visible width; this is used until it does.
 const DEFAULT_SMILEY_SIZE = 0.5;
 const GLOW_HZ = 1.2;
@@ -224,7 +227,7 @@ export function placeBox(box, frameId, fit = DEFAULT_SMILEY_SIZE) {
   const p = snap.projection.elements;
   const width = ((xmax - xmin) / 500) * (depth / p[0]);
   const height = ((ymax - ymin) / 500) * (depth / p[5]);
-  const side = THREE.MathUtils.clamp(Math.min(width, height) * fit, SMILEY_MIN, SMILEY_MAX);
+  const side = THREE.MathUtils.clamp(Math.max(Math.min(width, height) * fit, depth * SMILEY_MIN_VIEW), SMILEY_MIN, SMILEY_MAX);
   // The camera's up direction when the frame was taken, so the face reads upright to the viewer.
   const up = new THREE.Vector3(0, 1, 0).transformDirection(snap.cameraToWorld);
 
@@ -451,7 +454,14 @@ function showStats() {
   const el = document.getElementById("ar-debug");
   if (!el) return;
   const tracking = reality ? `${reality.trackingStatus} ${reality.trackingReason}` : "no tracking yet";
-  const markerState = placement ? `shown, ${stats.refines} surface re-checks (last: ${stats.lastRefine || "none"})` : "not placed";
+  let markerState = "not placed";
+  if (placement && smiley) {
+    const { camera } = XR8.Threejs.xrScene();
+    const at = smiley.position.clone().project(camera);
+    const onScreen = at.z < 1 && Math.abs(at.x) <= 1 && Math.abs(at.y) <= 1;
+    const where = `screen ${Math.round((at.x + 1) * 50)}%, ${Math.round((1 - at.y) * 50)}%${onScreen ? "" : " (off screen)"}`;
+    markerState = `${where}, ${stats.refines} surface re-checks (last: ${stats.lastRefine || "none"})`;
+  }
   el.textContent = [
     `tracking: ${tracking}`,
     `frames sent: ${stats.sent}, unreadable: ${stats.unreadable}, boxes: ${stats.boxes}`,
@@ -536,15 +546,16 @@ function sceneModule() {
 // along +Z, with raised eyes and smile, so it can be stuck flat onto a surface.
 function makeSmiley() {
   const DEPTH = 0.08;
+  // Mostly self-lit, so it's bright yellow whatever the room's like; the light just adds shading.
   smileyFace = new THREE.MeshStandardMaterial({
     color: 0xffd23f,
-    emissive: 0xffb000,
-    emissiveIntensity: 0.15,
+    emissive: 0xffc400,
+    emissiveIntensity: 0.7,
     roughness: 0.45,
     side: THREE.DoubleSide,
   });
-  const ink = new THREE.MeshStandardMaterial({ color: 0x2b1d0e, roughness: 0.6 });
-  const rimMaterial = new THREE.MeshStandardMaterial({ color: 0xe8a800, roughness: 0.5 });
+  const ink = new THREE.MeshStandardMaterial({ color: 0x1a1006, roughness: 0.6 });
+  const rimMaterial = new THREE.MeshStandardMaterial({ color: 0xf0a000, emissive: 0xc07800, emissiveIntensity: 0.6 });
 
   const disc = new THREE.CylinderGeometry(0.5, 0.5, DEPTH, 48);
   disc.rotateX(Math.PI / 2);
@@ -588,5 +599,5 @@ function animateMarker(time) {
   }
   smiley.scale.setScalar(size);
   // Stuck on, so it doesn't move or scale: it just glows gently.
-  smileyFace.emissiveIntensity = 0.15 + 0.1 * Math.sin((time / 1000) * 2 * Math.PI * GLOW_HZ);
+  smileyFace.emissiveIntensity = 0.7 + 0.15 * Math.sin((time / 1000) * 2 * Math.PI * GLOW_HZ);
 }
