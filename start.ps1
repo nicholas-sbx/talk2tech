@@ -10,26 +10,8 @@ param(
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
 
+& "$PSScriptRoot\setup.ps1"
 $python = ".venv\Scripts\python.exe"
-if (-not (Test-Path $python)) {
-    Write-Host "Creating virtual environment..."
-    python -m venv .venv
-}
-
-# Reinstall dependencies only when requirements.txt changes.
-$hash = (Get-FileHash requirements.txt).Hash
-$stamp = ".venv\.requirements-hash"
-if (-not (Test-Path $stamp) -or (Get-Content $stamp) -ne $hash) {
-    Write-Host "Installing dependencies..."
-    & $python -m pip install -q --disable-pip-version-check -r requirements.txt
-    if ($LASTEXITCODE -ne 0) { throw "pip install failed" }
-    Set-Content $stamp $hash
-}
-
-if (-not (Test-Path .env)) {
-    Copy-Item .env.example .env
-    Write-Host "Created .env from .env.example. Add your API keys there (blank keys run in mock mode)."
-}
 
 if (Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue) {
     throw "Port $Port is already in use. Try: .\start.ps1 -Port $($Port + 1)"
