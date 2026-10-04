@@ -10,8 +10,10 @@ const ENGINE_URL = "https://cdn.jsdelivr.net/npm/@8thwall/engine-binary@1.0.0/di
 const MAX_FRAME_SIDE = 768;
 const SNAPSHOTS_KEPT = 10;
 const CAPTURE_TIMEOUT_MS = 1000;
-const SURFACE_GRID = 5; // surface hit tests per side, a fallback when no tracked points hit the object
-const BOX_CORE = 0.6; // only trust tracked points in the middle of the box, not its edges
+// Hit tests per side of a grid over each frame we send. The engine doesn't expose its tracked points,
+// so this samples where the world is; the ones that land on the object give its depth.
+const HIT_GRID = 8;
+const BOX_CORE = 0.6; // only trust hits in the middle of the box, not its edges
 // Scene units are about metres: tracking assumes the phone starts this high above the floor.
 const CAMERA_HEIGHT = 1.4;
 const FALLBACK_DEPTH = 0.6;
@@ -101,7 +103,7 @@ export async function startAR() {
 
   await new Promise((resolve, reject) => {
     XR8.addCameraPipelineModules([
-      XR8.FullWindowCanvas.pipelineModule(),
+      fullWindowModule(),
       XR8.XrController.pipelineModule(),
       XR8.GlTextureRenderer.pipelineModule(), // draws the camera feed
       captureModule(), // runs after the feed is drawn but before the cube is, so frames are clean
@@ -154,8 +156,8 @@ export function placeBox(box, frameId) {
   }
   const [ymin, xmin, ymax, xmax] = box;
 
-  // How far away the object is: tracked points that land inside the box, as seen from the camera
-  // when the frame was taken; failing that, the estimated surfaces under the box.
+  // How far away the object is: tracked feature points that land inside the box, as seen from the
+  // camera when the frame was taken; failing that, the estimated surfaces under the box.
   const cy = (ymin + ymax) / 2;
   const cx = (xmin + xmax) / 2;
   const halfH = ((ymax - ymin) / 2) * BOX_CORE;
@@ -166,8 +168,10 @@ export function placeBox(box, frameId) {
   const fromSurfaces = depthsIn(snap.surfaces);
   const depth = median(fromPoints) ?? median(fromSurfaces) ?? FALLBACK_DEPTH;
   const source = fromPoints.length
-    ? `${fromPoints.length}/${snap.points.length} points`
-    : fromSurfaces.length ? `${fromSurfaces.length} surface hits` : "no hits, fixed depth";
+    ? `${fromPoints.length}/${snap.points.length} feature hits`
+    : fromSurfaces.length
+      ? `${fromSurfaces.length}/${snap.surfaces.length} surface hits`
+      : `no hits in box (${snap.points.length} feature, ${snap.surfaces.length} surface), fixed depth`;
 
   // Ray from the camera through the centre of the box, out to that depth.
   const ndc = new THREE.Vector3(cx / 500 - 1, 1 - cy / 500, -1).applyMatrix4(snap.projectionInverse);
@@ -184,8 +188,8 @@ export function placeBox(box, frameId) {
 
   // The points are on the object's front surface: sit the cube's centre inside it.
   target = origin.addScaledVector(dir, along + targetSize / 2);
-  const at = target.toArray().map((v) => v.toFixed(2)).join(", ");
-  stats.lastBox = `${frameId}: depth ${depth.toFixed(2)} (${source}), cube ${targetSize.toFixed(2)} at ${at}`;
+  const fmt = (v) => v.toArray().map((n) => n.toFixed(2)).join(", ");
+  stats.lastBox = `${frameId}: depth ${depth.toFixed(2)} (${source}), cube ${targetSize.toFixed(2)} at ${fmt(target)}, camera was at ${fmt(new THREE.Vector3().setFromMatrixPosition(snap.cameraToWorld))}`;
 }
 
 export function clearCube() {
@@ -230,7 +234,7 @@ function captureModule() {
       }
       stats.sent++;
       const frameId = `ar${++frameCounter}`;
-      snapshots.set(frameId, snapshot(reality));
+      snapshots.set(frameId, snapshot());
       while (snapshots.size > SNAPSHOTS_KEPT) snapshots.delete(snapshots.keys().next().value);
       const waiters = captureWaiters;
       captureWaiters = [];
@@ -279,10 +283,9 @@ function showStats() {
   const el = document.getElementById("ar-debug");
   if (!el) return;
   const tracking = reality ? `${reality.trackingStatus} ${reality.trackingReason}` : "no tracking yet";
-  const points = reality?.worldPoints?.length ?? 0;
   const cubeState = target ? (cube?.visible ? "shown" : "placed") : "not placed";
   el.textContent = [
-    `tracking: ${tracking}, ${points} points`,
+    `tracking: ${tracking}`,
     `frames sent: ${stats.sent}, unreadable: ${stats.unreadable}, boxes: ${stats.boxes}`,
     `last box: ${stats.lastBox}`,
     `cube: ${cubeState}`,
@@ -290,20 +293,26 @@ function showStats() {
   el.hidden = false;
 }
 
-function snapshot({ position, rotation, intrinsics, worldPoints = [] }) {
-  const cameraToWorld = new THREE.Matrix4().compose(
-    new THREE.Vector3(position.x, position.y, position.z),
-    new THREE.Quaternion(rotation.x, rotation.y, rotation.z, rotation.w),
-    new THREE.Vector3(1, 1, 1),
-  );
-  const projection = new THREE.Matrix4().fromArray(intrinsics);
+// Called in onRender, after the three.js module has moved its camera to this frame's pose, so
+// placement uses exactly the camera the cube is drawn with.
+function snapshot() {
+  const { camera } = XR8.Threejs.xrScene();
+  camera.updateMatrixWorld();
+  const cameraToWorld = camera.matrixWorld.clone();
+  const projection = camera.projectionMatrix.clone();
+  const points = [];
   const surfaces = [];
-  for (let gy = 0; gy < SURFACE_GRID; gy++) {
-    for (let gx = 0; gx < SURFACE_GRID; gx++) {
-      const x = (gx + 0.5) / SURFACE_GRID;
-      const y = (gy + 0.5) / SURFACE_GRID;
-      const hit = XR8.XrController.hitTest(x, y, ["ESTIMATED_SURFACE", "DETECTED_SURFACE"])[0];
-      if (hit) surfaces.push(new THREE.Vector3(hit.position.x, hit.position.y, hit.position.z));
+  for (let gy = 0; gy < HIT_GRID; gy++) {
+    for (let gx = 0; gx < HIT_GRID; gx++) {
+      const hits = XR8.XrController.hitTest((gx + 0.5) / HIT_GRID, (gy + 0.5) / HIT_GRID, [
+        "FEATURE_POINT",
+        "ESTIMATED_SURFACE",
+        "DETECTED_SURFACE",
+      ]);
+      for (const hit of hits) {
+        const at = new THREE.Vector3(hit.position.x, hit.position.y, hit.position.z);
+        (hit.type === "FEATURE_POINT" ? points : surfaces).push(at);
+      }
     }
   }
   return {
@@ -311,8 +320,22 @@ function snapshot({ position, rotation, intrinsics, worldPoints = [] }) {
     worldToCamera: cameraToWorld.clone().invert(),
     projection,
     projectionInverse: projection.clone().invert(),
-    points: worldPoints.map(({ position: p }) => new THREE.Vector3(p.x, p.y, p.z)),
+    points,
     surfaces,
+  };
+}
+
+// Keeps the canvas covering the window (the engine's own FullWindowCanvas is deprecated).
+function fullWindowModule() {
+  const fill = () => {
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+  };
+  return {
+    name: "talk2tech-fullwindow",
+    onAttach: fill,
+    // Wait a frame: the new window size lands after the orientation event.
+    onDeviceOrientationChange: () => requestAnimationFrame(fill),
   };
 }
 
