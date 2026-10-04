@@ -100,36 +100,9 @@ let screamListener = null;
 let screaming = false;
 let lastScream = 0;
 let slapListener = null;
-let lastCameraPos = null;
-let lastCameraQuat = null;
-let isCameraSteady = false;
-let steadySince = null;
-let lastHandMotion = -Infinity;
-let roiBuffer = null;
-let prevRoi = null;
-let prevBackground = null;
-let lastSlapTriggerTime = 0;
-const SLAP_OPTICAL_THRESHOLD = 26.0;
-const SLAP_DEBOUNCE_MS = 1200;
-// Moving the camera changes the whole picture, a slap only the object: the background has to stay
-// this still (average brightness change per pixel) for a change on the object to count.
-const SLAP_BACKGROUND_STILL = 5.0;
-// How long the camera must be held still, by both tracking and the phone's sensors, before watching.
-const SLAP_SETTLE_MS = 600;
-// The phone's own sensors: more spin (degrees/s) or shove (m/s², gravity removed) than a steady hand.
-const SLAP_MAX_SPIN = 15;
-const SLAP_MAX_SHOVE = 0.8;
-const PATCH = 16;
-// Spots away from the face, as fractions of the screen, to watch for the whole picture changing.
-const BACKGROUND_SPOTS = [[0.15, 0.15], [0.85, 0.15], [0.15, 0.85], [0.85, 0.85], [0.5, 0.1], [0.5, 0.9]];
-
-window.addEventListener("devicemotion", (e) => {
-  const r = e.rotationRate;
-  const a = e.acceleration;
-  const spin = r ? Math.hypot(r.alpha || 0, r.beta || 0, r.gamma || 0) : 0;
-  const shove = a ? Math.hypot(a.x || 0, a.y || 0, a.z || 0) : 0;
-  if (spin > SLAP_MAX_SPIN || shove > SLAP_MAX_SHOVE) lastHandMotion = performance.now();
-});
+// A poke this far out from the face's middle, in face radii plus a fingertip of CSS pixels, still hits it.
+const POKE_REACH = 1.3;
+const POKE_FINGER = 24;
 
 // Camera pose, projection and 3D points for each frame we sent, so a box that arrives seconds
 // later still maps onto the world the way it was when the photo was taken.
@@ -139,7 +112,7 @@ let captureWaiters = [];
 let reality = null; // this frame's tracking output
 
 // ?debug: what the AR pipeline did, shown on screen since phones have no console.
-const stats = { sent: 0, unreadable: 0, boxes: 0, lastBox: "none yet", refines: 0, lastRefine: "", opticalDiff: "", slaps: 0 };
+const stats = { sent: 0, unreadable: 0, boxes: 0, lastBox: "none yet", refines: 0, lastRefine: "", slaps: 0 };
 let statsShown = 0;
 
 // Where the smiley sits: a point on the surface, the surface normal (towards the camera), the
@@ -379,10 +352,20 @@ export function onScream(callback) {
   screamListener = callback;
 }
 
-// Calls back when a physical slap / object movement is detected by the camera.
+// Calls back when the face is poked on screen.
 export function onSlap(callback) {
   slapListener = callback;
 }
+
+// A tap on the face, give or take a fingertip, slaps it. Taps on the controls don't count.
+window.addEventListener("pointerdown", (e) => {
+  if (!slapListener || !smiley?.visible || face.isDead) return;
+  if (e.target.closest?.("button, input, textarea, a, form")) return;
+  const at = faceOnScreen();
+  if (!at || Math.hypot(e.clientX - at.x, e.clientY - at.y) > at.r * POKE_REACH + POKE_FINGER) return;
+  stats.slaps++;
+  slapListener();
+});
 
 // Triggers visual and procedural audio slap reaction.
 export function triggerSlap(angerLevel = 1) {
@@ -629,9 +612,8 @@ function showStats() {
     const mood = face.isDead ? "dead" : `panic ${face.panic.toFixed(2)}`;
     markerState = `${where}, ${mood}, ${stats.refines} surface re-checks (last: ${stats.lastRefine || "none"})`;
   }
-  const motionState = `camera: ${isCameraSteady ? "steady" : "moving"}, diff: ${stats.opticalDiff || "0"}, slaps: ${stats.slaps || 0}`;
   el.textContent = [
-    `tracking: ${tracking} (${motionState})`,
+    `tracking: ${tracking}, slaps: ${stats.slaps}`,
     `frames sent: ${stats.sent}, unreadable: ${stats.unreadable}, boxes: ${stats.boxes}`,
     `last box: ${stats.lastBox}`,
     `smiley: ${markerState}`,
@@ -702,104 +684,10 @@ function sceneModule() {
     },
     onUpdate: () => {
       const { camera } = XR8.Threejs.xrScene();
-      checkCameraStability(camera);
       if (++updates % REFINE_EVERY === 0) refineOnSurface(camera);
       animateMarker(performance.now(), camera);
-      detectObjectPhysicalMotion(camera);
     },
   };
-}
-
-function checkCameraStability(camera) {
-  if (!THREE || !camera) return;
-  camera.updateMatrixWorld();
-  const camPos = new THREE.Vector3().setFromMatrixPosition(camera.matrixWorld);
-  const camQuat = new THREE.Quaternion().setFromRotationMatrix(camera.matrixWorld);
-  if (!lastCameraPos) {
-    lastCameraPos = camPos.clone();
-    lastCameraQuat = camQuat.clone();
-    return;
-  }
-  const linearVel = camPos.distanceTo(lastCameraPos);
-  const dot = Math.min(1, Math.max(-1, camQuat.dot(lastCameraQuat)));
-  const angularVel = 2 * Math.acos(Math.abs(dot));
-  const now = performance.now();
-  const still = linearVel < 0.008 && angularVel < 0.015 && now - lastHandMotion > SLAP_SETTLE_MS;
-  if (!still) steadySince = null;
-  else steadySince ??= now;
-  isCameraSteady = steadySince !== null && now - steadySince > SLAP_SETTLE_MS;
-  lastCameraPos.copy(camPos);
-  lastCameraQuat.copy(camQuat);
-}
-
-function detectObjectPhysicalMotion(camera) {
-  if (!running || !gl || !placement || !smiley || !smiley.visible || !isCameraSteady) {
-    prevRoi = null;
-    prevBackground = null;
-    return;
-  }
-  camera.updateMatrixWorld();
-  const at = smiley.position.clone().project(camera);
-  if (at.z >= 1 || Math.abs(at.x) > 0.95 || Math.abs(at.y) > 0.95) {
-    prevRoi = null;
-    prevBackground = null;
-    return;
-  }
-  const u = (at.x + 1) / 2;
-  const v = (1 - at.y) / 2;
-
-  const bound = gl.getParameter(gl.FRAMEBUFFER_BINDING);
-  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-  if (!roiBuffer) roiBuffer = new Uint8Array(PATCH * PATCH * 4);
-  readPatch(u, v, roiBuffer);
-  // Only spots well clear of the face, so the object itself moving doesn't count as background.
-  const background = BACKGROUND_SPOTS.map(([bu, bv]) =>
-    Math.hypot(bu - u, bv - v) < 0.3 ? null : readPatch(bu, bv, new Uint8Array(PATCH * PATCH * 4)),
-  );
-  gl.bindFramebuffer(gl.FRAMEBUFFER, bound);
-
-  if (prevRoi && prevBackground) {
-    const avgDiff = patchDiff(roiBuffer, prevRoi);
-    let backgroundDiff = 0;
-    let spotsSeen = 0;
-    background.forEach((patch, i) => {
-      if (!patch || !prevBackground[i]) return;
-      backgroundDiff = Math.max(backgroundDiff, patchDiff(patch, prevBackground[i]));
-      spotsSeen++;
-    });
-    stats.opticalDiff = `${avgDiff.toFixed(1)} (background ${backgroundDiff.toFixed(1)})`;
-
-    const now = performance.now();
-    const objectMoved = avgDiff > SLAP_OPTICAL_THRESHOLD;
-    const pictureStill = spotsSeen >= 2 && backgroundDiff < SLAP_BACKGROUND_STILL;
-    if (objectMoved && pictureStill && now - lastSlapTriggerTime > SLAP_DEBOUNCE_MS) {
-      lastSlapTriggerTime = now;
-      stats.slaps = (stats.slaps || 0) + 1;
-      slapListener?.();
-    }
-  }
-  if (!prevRoi) prevRoi = new Uint8Array(PATCH * PATCH * 4);
-  prevRoi.set(roiBuffer);
-  prevBackground = background;
-}
-
-// Reads the PATCH x PATCH square of the screen centred on (u, v), as fractions from the top left.
-function readPatch(u, v, out) {
-  const width = gl.drawingBufferWidth;
-  const height = gl.drawingBufferHeight;
-  const x = Math.max(0, Math.min(width - PATCH, Math.floor(u * width) - PATCH / 2));
-  const y = Math.max(0, Math.min(height - PATCH, Math.floor((1 - v) * height) - PATCH / 2));
-  gl.readPixels(x, y, PATCH, PATCH, gl.RGBA, gl.UNSIGNED_BYTE, out);
-  return out;
-}
-
-// Average change in brightness per pixel between two patches.
-function patchDiff(a, b) {
-  let sum = 0;
-  for (let i = 0; i < a.length; i += 4) {
-    sum += Math.abs((a[i] + a[i + 1] + a[i + 2]) / 3 - (b[i] + b[i + 1] + b[i + 2]) / 3);
-  }
-  return sum / (PATCH * PATCH);
 }
 
 // ---------- the smiley ----------

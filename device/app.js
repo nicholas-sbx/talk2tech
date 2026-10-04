@@ -703,14 +703,6 @@ async function handleSlap() {
 
 onSlap(() => handleSlap());
 
-// Desktop / dev fallback: 'S' key triggers slap when not typing in the text box
-window.addEventListener("keydown", (e) => {
-  if ((e.key === "s" || e.key === "S") && !e.ctrlKey && !e.altKey && !e.metaKey) {
-    if (document.activeElement === textInput) return;
-    handleSlap();
-  }
-});
-
 $("#reset").addEventListener("click", () => {
   stopSpeech();
   send({ type: "reset" });
