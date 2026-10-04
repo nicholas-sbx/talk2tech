@@ -334,14 +334,17 @@ function toBase64(blob) {
 
 // ---------- typed fallback ----------
 
-// The text box only exists while focused: the keyboard button opens it, losing focus hides it.
+// On touch screens the text box only exists while focused: the keyboard button opens it,
+// losing focus hides it. With a mouse, the keyboard button just toggles it.
+const touchScreen = matchMedia("(pointer: coarse)").matches;
+
 $("#keyboard").addEventListener("click", () => {
-  textForm.hidden = false;
-  textInput.focus();
+  textForm.hidden = !touchScreen && !textForm.hidden;
+  if (!textForm.hidden) textInput.focus();
 });
 
 textForm.addEventListener("focusout", (e) => {
-  if (!textForm.contains(e.relatedTarget)) textForm.hidden = true;
+  if (touchScreen && !textForm.contains(e.relatedTarget)) textForm.hidden = true;
 });
 
 // Keep focus in the input when tapping Send, so the form isn't hidden before the tap lands.
@@ -354,7 +357,7 @@ textForm.addEventListener("submit", (e) => {
   stopSpeech();
   send({ type: "text", text, image: grabFrame() });
   textInput.value = "";
-  textInput.blur();
+  if (touchScreen) textInput.blur(); // dismiss the on-screen keyboard
 });
 
 // ---------- show text toggle (off by default, remembered per phone) ----------
