@@ -7,7 +7,7 @@ import time
 from collections.abc import AsyncIterator
 
 from integrations import config
-from integrations.voices import voice_menu
+from integrations.voices import VOICES, voice_menu
 
 log = logging.getLogger(__name__)
 
@@ -25,7 +25,7 @@ Reply with JSON only, using exactly these keys:
 - "voice": the best match from this list of keys:
 {voice_menu()}
 - "greeting": the first thing it says on waking up, one or two short sentences
-- "box_2d": where that object is in the photo, as [ymin, xmin, ymax, xmax] integers normalized to 0-1000
+- "box_2d": one box around the whole object in the photo, as [ymin, xmin, ymax, xmax] integers normalized to 0-1000
 - "smiley_size": a 3D smiley face sticker will be stuck flat on the object's visible surface. Pick
   its diameter as a fraction of the object's visible width, between 0.1 and 1.0, so it looks right
   for that object: big on a ball or a mug, a small sticker on a laptop lid, a car, or a fridge.
@@ -48,8 +48,37 @@ switch to a different object (talk to, look at, track, wake up, or point at some
 Reply with JSON only, using exactly these keys:
 - "switch": true only if they asked for a different object
 - "object": the object they want, in a few words
-- "box_2d": where that object is in the photo, as [ymin, xmin, ymax, xmax] integers normalized to
-  0-1000, or null if it isn't visible"""
+- "box_2d": one box around the whole object in the photo, as [ymin, xmin, ymax, xmax] integers
+  normalized to 0-1000, or null if it isn't visible"""
+
+
+# Gemini's answers are held to these shapes, so it can't nest, split or pad a box, or make up a voice.
+BOX_SCHEMA = {
+    "type": "array",
+    "items": {"type": "integer", "minimum": 0, "maximum": 1000},
+    "minItems": 4,
+    "maxItems": 4,
+}
+_PERSONA_FIELDS = {
+    "object": {"type": "string"},
+    "name": {"type": "string"},
+    "personality": {"type": "string"},
+    "speaking_style": {"type": "string"},
+    "voice": {"type": "string", "enum": list(VOICES)},
+    "greeting": {"type": "string"},
+    "box_2d": BOX_SCHEMA,
+    "smiley_size": {"type": "number", "minimum": 0.1, "maximum": 1.0},
+}
+PERSONA_SCHEMA = {"type": "object", "properties": _PERSONA_FIELDS, "required": list(_PERSONA_FIELDS)}
+FOCUS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "switch": {"type": "boolean"},
+        "object": {"type": "string"},
+        "box_2d": {"anyOf": [BOX_SCHEMA, {"type": "null"}]},
+    },
+    "required": ["switch", "object", "box_2d"],
+}
 
 
 def persona_system_prompt(persona: dict) -> str:
@@ -170,7 +199,9 @@ class GeminiLLM:
         _, text = await self._stream(
             "persona",
             contents=contents,
-            config=self._config(response_mime_type="application/json", temperature=1.0),
+            config=self._config(
+                response_mime_type="application/json", response_json_schema=PERSONA_SCHEMA, temperature=1.0
+            ),
         )
         return _normalize_persona(json.loads("".join([part async for part in text])))
 
@@ -182,7 +213,9 @@ class GeminiLLM:
         _, text = await self._stream(
             "focus",
             contents=[self._image_part(image), focus_prompt(object_name, user_text)],
-            config=self._config(response_mime_type="application/json", temperature=0.0),
+            config=self._config(
+                response_mime_type="application/json", response_json_schema=FOCUS_SCHEMA, temperature=0.0
+            ),
         )
         return _normalize_focus(json.loads("".join([part async for part in text])), object_name)
 
@@ -286,9 +319,9 @@ def _normalize_focus(raw, current: str) -> dict:
 def _normalize_box(raw) -> list[int] | None:
     """A valid [ymin, xmin, ymax, xmax] box in 0-1000, or None.
 
-    Gemini sometimes wraps the box in another list, puts a stray value next to it, or splits the
-    object into several boxes (a laptop's screen and its base), so this takes the box around every
-    valid one it finds.
+    The response schemas should rule it out, but without them Gemini sometimes wrapped the box in
+    another list, put a stray value next to it, or split the object into several boxes (a laptop's
+    screen and its base), so this still takes the box around every valid one it finds.
     """
     boxes = _find_boxes(raw)
     if not boxes:
