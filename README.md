@@ -46,11 +46,14 @@ Without HTTPS the page still loads, but only the typed fallback works.
 
 On a phone the camera runs through the [8th Wall engine](https://8thwall.org) (world tracking in plain
 Safari or Chrome, no app or WebXR needed). When an object wakes up, a 3D smiley face is stuck flat
-on its surface (Gemini picks how big) and stays there as you move. Allow motion access when asked; without it the app falls
+on its surface (Gemini picks how big) and stays there as you move. While it's waking up, a hand-drawn
+spell circles the screen and pops onto the new face; after that, the face turns into a thought bubble
+whenever it's working out an answer. Allow motion access when asked; without it the app falls
 back to the plain camera view. The engine is © Niantic Spatial, Inc., used under its
 [XR Engine License Agreement](https://github.com/8thwall/engine/blob/main/LICENSE).
 
-**Controls:** hold the big button and talk, release to send. Holding it again interrupts the reply.
+**Controls:** hold the big button and talk, release to send. It spins until the reply starts, and
+holding it again interrupts the reply.
 The reset button (top right) forgets the current object so you can wake up a new one. The keyboard
 button lets you type instead, and the captions button shows the conversation as subtitles. Add
 `?debug` to the URL to show which services are live.

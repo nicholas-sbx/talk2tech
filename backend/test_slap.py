@@ -18,7 +18,8 @@ class TestSlapInteraction(unittest.TestCase):
 
         async def get_reply(prompt: str) -> str:
             chunks = []
-            async for token in mock.reply_stream(persona, [], prompt, None):
+            _, words = await mock.reply_stream(persona, [], prompt, None)
+            async for token in words:
                 chunks.append(token)
             return "".join(chunks).strip()
 
