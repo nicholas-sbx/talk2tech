@@ -36,7 +36,7 @@ ELEVENLABS_API_KEY = _env("ELEVENLABS_API_KEY")
 ELEVENLABS_STT_MODEL = _env("ELEVENLABS_STT_MODEL", "scribe_v1")
 # Eleven v3/v4 act out inline audio tags like [laughs] or [whispers]; older models would read them aloud.
 ELEVENLABS_TTS_MODEL = _env("ELEVENLABS_TTS_MODEL", "eleven_v4")
-ELEVENLABS_DEFAULT_VOICE_ID = _env("ELEVENLABS_DEFAULT_VOICE_ID", "21m00Tcm4TlvDq8ikWAM")
+ELEVENLABS_DEFAULT_VOICE_ID = _env("ELEVENLABS_DEFAULT_VOICE_ID", "EXAVITQu4vr4xnSDxMaL")
 
 LOCAL_EVENTS_PATH = ROOT / "data" / "events.jsonl"
 
