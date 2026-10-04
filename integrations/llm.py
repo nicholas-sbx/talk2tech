@@ -3,12 +3,15 @@
 import asyncio
 import json
 import logging
+import time
 from collections.abc import AsyncIterator
 
 from integrations import config
 from integrations.voices import voice_menu
 
 log = logging.getLogger(__name__)
+
+RETRYABLE = (429, 500, 503, 504)
 
 BIRTH_PROMPT = f"""Look at this photo and pick the single most prominent physical object in it.
 Imagine that object just woke up and can talk. Invent a vivid, funny personality that fits how it
@@ -44,6 +47,7 @@ class GeminiLLM:
 
         self._client = genai.Client(api_key=config.GEMINI_API_KEY)
         self._models = [m for m in (config.GEMINI_MODEL, config.GEMINI_FALLBACK_MODEL) if m]
+        self._skip_until: dict[str, float] = {}  # model -> monotonic time it's worth trying again
 
     def _config(self, **kwargs):
         from google.genai import types
@@ -53,17 +57,46 @@ class GeminiLLM:
             kwargs["thinking_config"] = types.ThinkingConfig(thinking_level=config.GEMINI_THINKING_LEVEL)
         return types.GenerateContentConfig(**kwargs)
 
-    async def _with_fallback(self, call, **kwargs):
-        """Try each model in turn when one is overloaded or rate limited (503/429)."""
+    async def _stream(self, **kwargs) -> AsyncIterator[str]:
+        """Stream text from the first model that starts answering in time.
+
+        A model that errors (429/5xx) or is silent for GEMINI_TIMEOUT_S is abandoned for the next one
+        and skipped for GEMINI_COOLDOWN_S, so later turns don't wait on it again. The last model left
+        gets no deadline: something slow beats nothing.
+        """
         from google.genai import errors
 
-        for i, model in enumerate(self._models):
+        now = time.monotonic()
+        models = [m for m in self._models if self._skip_until.get(m, 0) <= now] or self._models[-1:]
+
+        async def first_chunk(model):
+            stream = await self._client.aio.models.generate_content_stream(model=model, **kwargs)
+            chunks = stream.__aiter__()
             try:
-                return await call(model=model, **kwargs)
-            except errors.APIError as e:
-                if e.code not in (429, 503) or i == len(self._models) - 1:
+                return chunks, await chunks.__anext__()
+            except StopAsyncIteration:
+                return chunks, None
+
+        for i, model in enumerate(models):
+            last = i == len(models) - 1
+            try:
+                attempt = first_chunk(model)
+                chunks, first = await (attempt if last else asyncio.wait_for(attempt, config.GEMINI_TIMEOUT_S))
+                break
+            except (errors.APIError, TimeoutError) as e:
+                reason = f"timed out after {config.GEMINI_TIMEOUT_S:g}s" if isinstance(e, TimeoutError) else e.code
+                if last or (isinstance(e, errors.APIError) and e.code not in RETRYABLE):
                     raise
-                log.warning("Gemini %s unavailable (%s), falling back to %s", model, e.code, self._models[i + 1])
+                self._skip_until[model] = time.monotonic() + config.GEMINI_COOLDOWN_S
+                log.warning("Gemini %s %s, falling back to %s", model, reason, models[i + 1])
+
+        if first is None:
+            return
+        if first.text:
+            yield first.text
+        async for chunk in chunks:
+            if chunk.text:
+                yield chunk.text
 
     @staticmethod
     def _image_part(image: bytes):
@@ -73,12 +106,14 @@ class GeminiLLM:
 
     async def make_persona(self, image: bytes | None) -> dict:
         contents = [self._image_part(image), BIRTH_PROMPT] if image else [BIRTH_PROMPT]
-        resp = await self._with_fallback(
-            self._client.aio.models.generate_content,
-            contents=contents,
-            config=self._config(response_mime_type="application/json", temperature=1.0),
-        )
-        return _normalize_persona(json.loads(resp.text))
+        parts = [
+            text
+            async for text in self._stream(
+                contents=contents,
+                config=self._config(response_mime_type="application/json", temperature=1.0),
+            )
+        ]
+        return _normalize_persona(json.loads("".join(parts)))
 
     async def reply_stream(
         self, persona: dict, history: list[dict], user_text: str, image: bytes | None
@@ -96,18 +131,15 @@ class GeminiLLM:
         parts.append(types.Part.from_text(text=user_text))
         contents.append(types.Content(role="user", parts=parts))
 
-        stream = await self._with_fallback(
-            self._client.aio.models.generate_content_stream,
+        async for text in self._stream(
             contents=contents,
             config=self._config(
                 system_instruction=persona_system_prompt(persona),
                 max_output_tokens=1024,  # includes thinking tokens; the prompt keeps replies short
                 temperature=0.9,
             ),
-        )
-        async for chunk in stream:
-            if chunk.text:
-                yield chunk.text
+        ):
+            yield text
 
 
 class MockLLM:

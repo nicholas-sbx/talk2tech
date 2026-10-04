@@ -21,6 +21,9 @@ GEMINI_MODEL = _env("GEMINI_MODEL", "gemini-3.5-flash-lite")
 GEMINI_FALLBACK_MODEL = _env("GEMINI_FALLBACK_MODEL", "gemini-3.5-flash")
 # Less thinking = faster replies. gemini-3.5-flash-lite supports minimal/low/medium/high.
 GEMINI_THINKING_LEVEL = _env("GEMINI_THINKING_LEVEL", "minimal")
+# Give up on a model that hasn't started answering within this many seconds, and skip it for a while.
+GEMINI_TIMEOUT_S = float(_env("GEMINI_TIMEOUT_S", "3"))
+GEMINI_COOLDOWN_S = float(_env("GEMINI_COOLDOWN_S", "60"))
 
 ELEVENLABS_API_KEY = _env("ELEVENLABS_API_KEY")
 ELEVENLABS_STT_MODEL = _env("ELEVENLABS_STT_MODEL", "scribe_v1")
