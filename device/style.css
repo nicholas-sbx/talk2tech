@@ -163,6 +163,20 @@ body:not(.show-text) .line.thing { display: none; }
 .mode { margin-top: 12px; font-size: 11px; color: var(--muted); text-align: center; }
 .mode[hidden] { display: none; }
 
+/* The model that wrote the last reply. Sits in the footer's bottom padding, so the talk button
+   doesn't jump when it first appears. */
+.model {
+  position: absolute;
+  left: 0; right: 0;
+  bottom: calc(var(--safe-bottom) + 4px);
+  font-size: 11px;
+  line-height: 1;
+  color: var(--muted);
+  text-align: center;
+  text-shadow: var(--shadow);
+  pointer-events: none;
+}
+
 /* ?debug: the last frame sent to Gemini, with the box it found. */
 .debug-frame {
   position: fixed;

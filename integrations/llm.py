@@ -82,8 +82,8 @@ class GeminiLLM:
         kwargs["automatic_function_calling"] = types.AutomaticFunctionCallingConfig(disable=True)
         return types.GenerateContentConfig(**kwargs)
 
-    async def _stream(self, what: str, **kwargs) -> AsyncIterator[str]:
-        """Stream text from whichever model starts answering first.
+    async def _stream(self, what: str, **kwargs) -> tuple[str, AsyncIterator[str]]:
+        """Whichever model starts answering first: its name, and its text as it streams.
 
         Gemini latency under load is spiky per request rather than per model, so instead of waiting
         out a slow request we hedge: if nothing has arrived after GEMINI_HEDGE_S (or the request
@@ -146,13 +146,17 @@ class GeminiLLM:
         model, launched, chunks, first = winner
         now = time.perf_counter()
         log.info("[gemini] %s: %s first words %.2fs (%.2fs since start)", what, model, now - launched, now - start)
-        if first is not None:
-            if first.text:
-                yield first.text
-            async for chunk in chunks:
-                if chunk.text:
-                    yield chunk.text
-        log.info("[gemini] %s: %s finished %.2fs", what, model, time.perf_counter() - start)
+
+        async def text() -> AsyncIterator[str]:
+            if first is not None:
+                if first.text:
+                    yield first.text
+                async for chunk in chunks:
+                    if chunk.text:
+                        yield chunk.text
+            log.info("[gemini] %s: %s finished %.2fs", what, model, time.perf_counter() - start)
+
+        return model, text()
 
     @staticmethod
     def _image_part(image: bytes):
@@ -163,34 +167,29 @@ class GeminiLLM:
     async def make_persona(self, image: bytes | None, focus: str | None = None) -> dict:
         prompt = birth_prompt(focus)
         contents = [self._image_part(image), prompt] if image else [prompt]
-        parts = [
-            text
-            async for text in self._stream(
-                "persona",
-                contents=contents,
-                config=self._config(response_mime_type="application/json", temperature=1.0),
-            )
-        ]
-        return _normalize_persona(json.loads("".join(parts)))
+        _, text = await self._stream(
+            "persona",
+            contents=contents,
+            config=self._config(response_mime_type="application/json", temperature=1.0),
+        )
+        return _normalize_persona(json.loads("".join([part async for part in text])))
 
     async def focus(self, image: bytes, object_name: str, user_text: str) -> dict:
         """Which object the user means now, and where it is in this frame.
 
         Returns {"switch": bool, "object": str, "box_2d": box or None}.
         """
-        parts = [
-            text
-            async for text in self._stream(
-                "focus",
-                contents=[self._image_part(image), focus_prompt(object_name, user_text)],
-                config=self._config(response_mime_type="application/json", temperature=0.0),
-            )
-        ]
-        return _normalize_focus(json.loads("".join(parts)), object_name)
+        _, text = await self._stream(
+            "focus",
+            contents=[self._image_part(image), focus_prompt(object_name, user_text)],
+            config=self._config(response_mime_type="application/json", temperature=0.0),
+        )
+        return _normalize_focus(json.loads("".join([part async for part in text])), object_name)
 
     async def reply_stream(
         self, persona: dict, history: list[dict], user_text: str, image: bytes | None
-    ) -> AsyncIterator[str]:
+    ) -> tuple[str, AsyncIterator[str]]:
+        """The model answering, and its in-character reply as it streams."""
         from google.genai import types
 
         contents = [
@@ -204,7 +203,7 @@ class GeminiLLM:
         parts.append(types.Part.from_text(text=user_text))
         contents.append(types.Content(role="user", parts=parts))
 
-        async for text in self._stream(
+        return await self._stream(
             "reply",
             contents=contents,
             config=self._config(
@@ -212,8 +211,7 @@ class GeminiLLM:
                 max_output_tokens=1024,  # includes thinking tokens; the prompt keeps replies short
                 temperature=0.9,
             ),
-        ):
-            yield text
+        )
 
 
 MOCK_BOX = [300, 300, 700, 700]  # the middle of the frame
@@ -245,11 +243,15 @@ class MockLLM:
 
     async def reply_stream(
         self, persona: dict, history: list[dict], user_text: str, image: bytes | None
-    ) -> AsyncIterator[str]:
+    ) -> tuple[str, AsyncIterator[str]]:
         reply = f"You said: {user_text}. Fascinating. Now, is anyone going to fill me with coffee or not?"
-        for word in reply.split(" "):
-            await asyncio.sleep(0.03)
-            yield word + " "
+
+        async def words() -> AsyncIterator[str]:
+            for word in reply.split(" "):
+                await asyncio.sleep(0.03)
+                yield word + " "
+
+        return "mock", words()
 
 
 def _normalize_persona(raw: dict) -> dict:
