@@ -1,7 +1,7 @@
 // talk2tech device client: camera + push-to-talk mic -> backend WebSocket -> spoken replies.
 // Message formats: docs/protocol.md
 
-import { arSupported, requestMotionPermission, startAR, captureFrame, placeBox, clearMarker, inAR, setSpeaking, setThinking, faceOnScreen, onDeath, onScream, onSlap, triggerSlap, playOwSound, setFaceScale, DEFAULT_FACE_SCALE } from "./ar.js";
+import { arSupported, requestMotionPermission, startAR, captureFrame, placeBox, clearMarker, inAR, setSpeaking, setThinking, faceOnScreen, onDeath, onScream, onSlap, triggerSlap, playOwSound, setFaceScale, DEFAULT_FACE_SCALE, setDistanceCompensation, DEFAULT_DISTANCE_COMPENSATION } from "./ar.js";
 import { startMagic, finishMagic, stopMagic } from "./magic.js";
 
 const $ = (sel) => document.querySelector(sel);
@@ -555,12 +555,10 @@ showTextBtn.addEventListener("click", () => {
   try { localStorage.setItem("showText", on ? "1" : "0"); } catch {}
 });
 
-// ---------- settings: face size (remembered per phone) ----------
+// ---------- settings: face size and distance compensation (remembered per phone) ----------
 
 const settingsBtn = $("#settings-btn");
 const settingsPanel = $("#settings");
-const faceScaleInput = $("#face-scale");
-const faceScaleValue = $("#face-scale-value");
 function setSettingsOpen(open) {
   settingsPanel.hidden = !open;
   settingsBtn.setAttribute("aria-expanded", String(open));
@@ -571,20 +569,28 @@ window.addEventListener("pointerdown", (e) => {
   if (!settingsPanel.hidden && !e.target.closest("#settings, #settings-btn")) setSettingsOpen(false);
 });
 
-function applyFaceScale(scale) {
-  faceScaleInput.value = scale;
-  faceScaleValue.textContent = `${scale.toFixed(1)}×`;
-  setFaceScale(scale);
+// A slider that applies its value live, shows it, and remembers it under key.
+function setting(id, key, fallback, format, apply) {
+  const input = $(`#${id}`);
+  const shown = $(`#${id}-value`);
+  const set = (value, save) => {
+    input.value = value;
+    shown.textContent = format(value);
+    apply(value);
+    if (save) try { localStorage.setItem(key, String(value)); } catch {}
+  };
+  let saved = NaN;
+  try { saved = parseFloat(localStorage.getItem(key)); } catch {}
+  set(Number.isFinite(saved) ? saved : fallback, false);
+  input.addEventListener("input", () => set(parseFloat(input.value), true));
+  return () => set(fallback, true);
 }
-let savedFaceScale = NaN;
-try { savedFaceScale = parseFloat(localStorage.getItem("faceScale")); } catch {}
-applyFaceScale(Number.isFinite(savedFaceScale) ? savedFaceScale : DEFAULT_FACE_SCALE);
-function saveFaceScale(scale) {
-  applyFaceScale(scale);
-  try { localStorage.setItem("faceScale", String(scale)); } catch {}
-}
-faceScaleInput.addEventListener("input", () => saveFaceScale(parseFloat(faceScaleInput.value)));
-$("#face-scale-default").addEventListener("click", () => saveFaceScale(DEFAULT_FACE_SCALE));
+const settingResets = [
+  setting("face-scale", "faceScale", DEFAULT_FACE_SCALE, (v) => `${v.toFixed(1)}×`, setFaceScale),
+  setting("distance-compensation", "distanceCompensation", DEFAULT_DISTANCE_COMPENSATION,
+    (v) => `${Math.round(v * 100)}%`, setDistanceCompensation),
+];
+$("#settings-default").addEventListener("click", () => settingResets.forEach((reset) => reset()));
 
 // The face died (lost off screen): it stops mid-sentence and the rest of the reply is dropped.
 onDeath(() => {
