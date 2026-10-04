@@ -30,7 +30,9 @@ const SMILEY_MIN_VIEW = 0.14;
 // Gemini picks the smiley's diameter as a share of the object's visible width; this is used until it does.
 const DEFAULT_SMILEY_SIZE = 0.5;
 // Gemini's picks read small on the phone, so the face is drawn this much bigger than it asks for.
-const SMILEY_GROW = 1.4;
+// Adjustable from the settings panel (setFaceScale).
+export const DEFAULT_FACE_SCALE = 1.6;
+let faceScale = DEFAULT_FACE_SCALE;
 // The face is drawn on a canvas texture: FACE_UNITS of the drawing (eyes, mouth, brows at rest)
 // span one smiley diameter, and the plane is FACE_PLANE diameters across so bulging eyes, the
 // scream and sweat still fit.
@@ -279,7 +281,7 @@ export function placeBox(box, frameId, fit = DEFAULT_SMILEY_SIZE) {
   const width = ((xmax - xmin) / 500) * (depth / p[0]);
   const height = ((ymax - ymin) / 500) * (depth / p[5]);
   const side = THREE.MathUtils.clamp(
-    Math.max(Math.min(width, height) * fit * SMILEY_GROW, depth * SMILEY_MIN_VIEW),
+    Math.max(Math.min(width, height) * fit * faceScale, depth * SMILEY_MIN_VIEW),
     SMILEY_MIN,
     SMILEY_MAX,
   );
@@ -352,6 +354,13 @@ export function onScream(callback) {
   screamListener = callback;
 }
 
+// Changes how much bigger than Gemini's pick the face is drawn. A face already up grows or
+// shrinks to match.
+export function setFaceScale(scale) {
+  if (placement) placement.size = THREE.MathUtils.clamp(placement.size * (scale / faceScale), SMILEY_MIN, SMILEY_MAX);
+  faceScale = scale;
+}
+
 // Calls back when the face is poked on screen.
 export function onSlap(callback) {
   slapListener = callback;
@@ -360,7 +369,7 @@ export function onSlap(callback) {
 // A tap on the face, give or take a fingertip, slaps it. Taps on the controls don't count.
 window.addEventListener("pointerdown", (e) => {
   if (!slapListener || !smiley?.visible || face.isDead) return;
-  if (e.target.closest?.("button, input, textarea, a, form")) return;
+  if (e.target.closest?.("button, input, textarea, a, form, .settings")) return;
   const at = faceOnScreen();
   if (!at || Math.hypot(e.clientX - at.x, e.clientY - at.y) > at.r * POKE_REACH + POKE_FINGER) return;
   stats.slaps++;
