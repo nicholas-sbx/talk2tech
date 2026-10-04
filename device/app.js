@@ -24,6 +24,7 @@ const CAMERA_RETRY_MS = 2000;
 const VIDEO = { facingMode: "environment", width: { ideal: 1280 }, height: { ideal: 720 } };
 const AUDIO = { echoCancellation: true, noiseSuppression: true };
 const MIC_REOPEN_MS = 400;
+const MAX_CAPTION_LINES = 60;
 
 let ws;
 let camStream = null;
@@ -68,7 +69,6 @@ $("#start-btn").addEventListener("click", async () => {
       console.warn(micErr);
       const why = window.isSecureContext ? micErr.message : "Camera and mic need HTTPS (or localhost).";
       $("#start-error").textContent = `${why} Typing still works.`;
-      textForm.hidden = false;
       await new Promise((r) => setTimeout(r, 1500));
     }
     if (window.isSecureContext) retryCamera();
@@ -138,7 +138,7 @@ function handle(msg) {
       break;
     case "say":
       if (!thingLine) thingLine = line("thing", "");
-      thingLine.textContent = (thingLine.textContent + " " + msg.text).trim();
+      followCaptions(() => (thingLine.textContent = (thingLine.textContent + " " + msg.text).trim()));
       enqueueSpeech(msg.text, msg.audio);
       break;
     case "done":
@@ -151,6 +151,7 @@ function handle(msg) {
       $("#name").textContent = PLACEHOLDER.name;
       $("#object").textContent = PLACEHOLDER.object;
       captions.replaceChildren();
+      captions.classList.remove("scrolled");
       break;
     case "error":
       line("error", msg.message);
@@ -160,17 +161,28 @@ function handle(msg) {
 
 function setStatus(state) {
   talkBtn.disabled = !micAllowed;
-  statusEl.textContent = micAllowed || state !== "idle" ? STATUS_TEXT[state] || state : "Type below to talk";
+  statusEl.textContent = micAllowed || state !== "idle" ? STATUS_TEXT[state] || state : "Tap the keyboard to type";
 }
 
 function line(kind, text) {
   const el = document.createElement("div");
   el.className = `line ${kind}`;
   el.textContent = text;
-  captions.append(el);
-  while (captions.children.length > 4) captions.firstChild.remove();
+  followCaptions(() => {
+    captions.append(el);
+    while (captions.children.length > MAX_CAPTION_LINES) captions.firstChild.remove();
+  });
   return el;
 }
+
+// Keeps the newest caption in view, unless you've scrolled up to read older ones.
+function followCaptions(mutate) {
+  const atBottom = captions.scrollHeight - captions.scrollTop - captions.clientHeight < 24;
+  mutate();
+  if (atBottom) captions.scrollTop = captions.scrollHeight;
+}
+
+captions.addEventListener("scroll", () => captions.classList.toggle("scrolled", captions.scrollTop > 0));
 
 // ---------- camera frames ----------
 
@@ -322,10 +334,18 @@ function toBase64(blob) {
 
 // ---------- typed fallback ----------
 
+// The text box only exists while focused: the keyboard button opens it, losing focus hides it.
 $("#keyboard").addEventListener("click", () => {
-  textForm.hidden = !textForm.hidden;
-  if (!textForm.hidden) textInput.focus();
+  textForm.hidden = false;
+  textInput.focus();
 });
+
+textForm.addEventListener("focusout", (e) => {
+  if (!textForm.contains(e.relatedTarget)) textForm.hidden = true;
+});
+
+// Keep focus in the input when tapping Send, so the form isn't hidden before the tap lands.
+textForm.querySelector("button").addEventListener("pointerdown", (e) => e.preventDefault());
 
 textForm.addEventListener("submit", (e) => {
   e.preventDefault();
@@ -343,6 +363,7 @@ const showTextBtn = $("#show-text");
 function setShowText(on) {
   showTextBtn.setAttribute("aria-pressed", String(on));
   document.body.classList.toggle("show-text", on);
+  captions.scrollTop = captions.scrollHeight;
 }
 try { setShowText(localStorage.getItem("showText") === "1"); } catch { setShowText(false); }
 showTextBtn.addEventListener("click", () => {
