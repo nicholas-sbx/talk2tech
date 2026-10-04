@@ -75,6 +75,14 @@ const DEPTH_GAIN = 0.3;
 const REFINE_WINDOW = 0.3;
 const REFINE_LEASH = 0.3;
 const NORMAL_GAIN = 0.15;
+// Like iOS's AR coaching: one camera can only place points in 3D once it has seen them from two
+// places, so until enough of the view is mapped the user is asked to move the phone around.
+const MAP_GRID = 6; // hit tests per side, over the middle of the screen
+const MAP_MARGIN = 0.1; // share of each edge the grid leaves out
+const MAP_MIN_CELLS = 12; // grid cells with a feature point under them before the view counts as mapped
+const MAP_HOLD_MS = 600; // mapped this long in a row, so a flicker of points can't end it early
+const MAP_EVERY = 4; // frames between checks
+const LOST_AFTER_MS = 1500; // once mapped, tracking limited this long asks for movement again
 const DEBUG = new URLSearchParams(location.search).has("debug");
 const CAMERA_FAILURES = {
   DENY_CAMERA: "Camera access was blocked.",
@@ -98,6 +106,11 @@ let deathListener = null;
 let screamListener = null;
 let screaming = false;
 let lastScream = 0;
+let coachListener = null;
+let coaching = null; // what the user's being asked to do, or null
+let mapped = false; // the view has had enough points to place things
+let mappedSince = 0;
+let limitedSince = 0;
 
 // Camera pose, projection and 3D points for each frame we sent, so a box that arrives seconds
 // later still maps onto the world the way it was when the photo was taken.
@@ -107,7 +120,7 @@ let captureWaiters = [];
 let reality = null; // this frame's tracking output
 
 // ?debug: what the AR pipeline did, shown on screen since phones have no console.
-const stats = { sent: 0, unreadable: 0, boxes: 0, lastBox: "none yet", refines: 0, lastRefine: "" };
+const stats = { sent: 0, unreadable: 0, boxes: 0, lastBox: "none yet", refines: 0, lastRefine: "", mappedCells: 0 };
 let statsShown = 0;
 
 // Where the smiley sits: a point on the surface, the surface normal (towards the camera), the
@@ -316,6 +329,57 @@ export function onDeath(callback) {
 // pause for it.
 export function onScream(callback) {
   screamListener = callback;
+}
+
+// Calls back with what the user should do so tracking can map the scene: "start" (move the phone
+// to map it), "continue" (tracking was lost, move to find it again), "slow" (moving too fast), or
+// null once it's tracking well. Starts at "start".
+export function onCoaching(callback) {
+  coachListener = callback;
+}
+
+// Stop waiting for the view to be mapped, e.g. if it never gets enough points (a blank wall).
+export function skipCoaching() {
+  mapped = true;
+  setCoaching(null);
+}
+
+function setCoaching(reason) {
+  if (reason === coaching) return;
+  coaching = reason;
+  coachListener?.(reason);
+}
+
+// Starts by asking for movement until enough of the view has feature points under it, steadily.
+// After that only asks again if tracking stays lost for a while, so brief hiccups don't flash it.
+function checkMapping(now) {
+  const normal = reality?.trackingStatus === "NORMAL";
+  const tooFast = reality?.trackingReason === "TOO_MUCH_MOTION";
+  if (!mapped) {
+    if (updates % MAP_EVERY) return;
+    stats.mappedCells = normal ? mappedCells() : 0;
+    if (stats.mappedCells < MAP_MIN_CELLS) mappedSince = 0;
+    else mappedSince ||= now;
+    mapped = mappedSince > 0 && now - mappedSince >= MAP_HOLD_MS;
+    return setCoaching(mapped ? null : tooFast ? "slow" : "start");
+  }
+  if (normal) limitedSince = 0;
+  else limitedSince ||= now;
+  setCoaching(limitedSince && now - limitedSince >= LOST_AFTER_MS ? (tooFast ? "slow" : "continue") : null);
+}
+
+// How many cells of a grid over the middle of the screen have a tracked feature point under them.
+function mappedCells() {
+  let cells = 0;
+  const step = (1 - 2 * MAP_MARGIN) / MAP_GRID;
+  for (let gy = 0; gy < MAP_GRID; gy++) {
+    for (let gx = 0; gx < MAP_GRID; gx++) {
+      const x = MAP_MARGIN + (gx + 0.5) * step;
+      const y = MAP_MARGIN + (gy + 0.5) * step;
+      if (XR8.XrController.hitTest(x, y, ["FEATURE_POINT"]).length) cells++;
+    }
+  }
+  return cells;
 }
 
 function setScreaming(on) {
@@ -553,7 +617,7 @@ function showStats() {
     markerState = `${where}, ${mood}, ${stats.refines} surface re-checks (last: ${stats.lastRefine || "none"})`;
   }
   el.textContent = [
-    `tracking: ${tracking}`,
+    `tracking: ${tracking}, coaching: ${coaching ?? "off"} (${stats.mappedCells}/${MAP_GRID * MAP_GRID} cells mapped)`,
     `frames sent: ${stats.sent}, unreadable: ${stats.unreadable}, boxes: ${stats.boxes}`,
     `last box: ${stats.lastBox}`,
     `smiley: ${markerState}`,
@@ -617,12 +681,14 @@ function sceneModule() {
   return {
     name: "talk2tech-scene",
     onStart: () => {
+      setCoaching("start");
       const { scene, camera } = XR8.Threejs.xrScene();
       scene.add(makeSmiley());
       camera.position.set(0, CAMERA_HEIGHT, 0);
       XR8.XrController.updateCameraProjectionMatrix({ origin: camera.position, facing: camera.quaternion });
     },
     onUpdate: () => {
+      checkMapping(performance.now());
       if (++updates % REFINE_EVERY === 0) refineOnSurface(XR8.Threejs.xrScene().camera);
       animateMarker(performance.now(), XR8.Threejs.xrScene().camera);
     },
