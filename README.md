@@ -44,7 +44,9 @@ URL on the phone. Install cloudflared with `winget install Cloudflare.cloudflare
 Without HTTPS the page still loads, but only the typed fallback works.
 
 **Controls:** hold the big button and talk, release to send. Holding it again interrupts the reply.
-↺ forgets the current object so you can wake up a new one. ⌨ lets you type instead.
+The reset button (top right) forgets the current object so you can wake up a new one. The keyboard
+button lets you type instead, and the captions button shows the conversation as subtitles. Add
+`?debug` to the URL to show which services are live.
 
 ## Dashboard
 

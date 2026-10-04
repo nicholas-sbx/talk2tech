@@ -17,6 +17,7 @@ const STATUS_TEXT = {
   thinking: "Thinking…",
   speaking: "Speaking… (hold to interrupt)",
 };
+const PLACEHOLDER = { name: "Point at something", object: "then hold to talk" };
 const MAX_FRAME_SIDE = 768;
 const MIN_CLIP_MS = 300;
 
@@ -30,7 +31,7 @@ let audioCtx = null;
 let playChain = Promise.resolve();
 let playGen = 0; // bumped on interrupt so queued audio is dropped
 let currentSource = null;
-let thingBubble = null;
+let thingLine = null;
 
 // ---------- startup ----------
 
@@ -54,6 +55,7 @@ $("#start-btn").addEventListener("click", async () => {
     await new Promise((r) => setTimeout(r, 1500));
   }
   $("#start").hidden = true;
+  document.querySelector('meta[name="theme-color"]').content = "#000000";
   connect();
 });
 
@@ -79,36 +81,37 @@ function handle(msg) {
   switch (msg.type) {
     case "hello":
       $("#mode").textContent = `${msg.llm} · ${msg.voice} · memory: ${msg.memory}`;
+      $("#mode").hidden = !new URLSearchParams(location.search).has("debug");
       break;
     case "status":
       setStatus(msg.state);
       break;
     case "transcript":
-      thingBubble = null;
-      bubble("user", msg.text);
+      thingLine = null;
+      line("user", msg.text);
       break;
     case "persona":
       $("#name").textContent = msg.persona.name;
       $("#object").textContent = msg.persona.object;
       break;
     case "say":
-      if (!thingBubble) thingBubble = bubble("thing", "");
-      thingBubble.textContent = (thingBubble.textContent + " " + msg.text).trim();
+      if (!thingLine) thingLine = line("thing", "");
+      thingLine.textContent = (thingLine.textContent + " " + msg.text).trim();
       enqueueSpeech(msg.text, msg.audio);
       break;
     case "done":
-      thingBubble = null;
+      thingLine = null;
       break;
     case "stop":
       stopSpeech();
       break;
     case "reset":
-      $("#name").textContent = "Point at something";
-      $("#object").textContent = "Hold the button and say hi";
+      $("#name").textContent = PLACEHOLDER.name;
+      $("#object").textContent = PLACEHOLDER.object;
       captions.replaceChildren();
       break;
     case "error":
-      bubble("error", msg.message);
+      line("error", msg.message);
       break;
   }
 }
@@ -118,9 +121,9 @@ function setStatus(state) {
   statusEl.textContent = micStream || state !== "idle" ? STATUS_TEXT[state] || state : "Type below to talk";
 }
 
-function bubble(kind, text) {
+function line(kind, text) {
   const el = document.createElement("div");
-  el.className = `bubble ${kind}`;
+  el.className = `line ${kind}`;
   el.textContent = text;
   captions.append(el);
   while (captions.children.length > 4) captions.firstChild.remove();
@@ -210,12 +213,16 @@ textForm.addEventListener("submit", (e) => {
 
 // ---------- show text toggle (off by default, remembered per phone) ----------
 
-const showText = $("#show-text");
-try { showText.checked = localStorage.getItem("showText") === "1"; } catch {}
-document.body.classList.toggle("show-text", showText.checked);
-showText.addEventListener("change", () => {
-  document.body.classList.toggle("show-text", showText.checked);
-  try { localStorage.setItem("showText", showText.checked ? "1" : "0"); } catch {}
+const showTextBtn = $("#show-text");
+function setShowText(on) {
+  showTextBtn.setAttribute("aria-pressed", String(on));
+  document.body.classList.toggle("show-text", on);
+}
+try { setShowText(localStorage.getItem("showText") === "1"); } catch { setShowText(false); }
+showTextBtn.addEventListener("click", () => {
+  const on = showTextBtn.getAttribute("aria-pressed") !== "true";
+  setShowText(on);
+  try { localStorage.setItem("showText", on ? "1" : "0"); } catch {}
 });
 
 $("#reset").addEventListener("click", () => {
