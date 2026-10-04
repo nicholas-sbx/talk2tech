@@ -1,7 +1,7 @@
 // talk2tech device client: camera + push-to-talk mic -> backend WebSocket -> spoken replies.
 // Message formats: docs/protocol.md
 
-import { arSupported, requestMotionPermission, startAR, captureFrame, placeBox, clearMarker, inAR, setSpeaking, setThinking, faceOnScreen, onDeath, onScream, onSlap, triggerSlap, playOwSound } from "./ar.js";
+import { arSupported, requestMotionPermission, startAR, captureFrame, placeBox, clearMarker, inAR, setSpeaking, setThinking, faceOnScreen, onDeath, onScream, onSlap, triggerSlap, playOwSound, setFaceScale, DEFAULT_FACE_SCALE } from "./ar.js";
 import { startMagic, finishMagic, stopMagic } from "./magic.js";
 
 const $ = (sel) => document.querySelector(sel);
@@ -554,6 +554,37 @@ showTextBtn.addEventListener("click", () => {
   setShowText(on);
   try { localStorage.setItem("showText", on ? "1" : "0"); } catch {}
 });
+
+// ---------- settings: face size (remembered per phone) ----------
+
+const settingsBtn = $("#settings-btn");
+const settingsPanel = $("#settings");
+const faceScaleInput = $("#face-scale");
+const faceScaleValue = $("#face-scale-value");
+function setSettingsOpen(open) {
+  settingsPanel.hidden = !open;
+  settingsBtn.setAttribute("aria-expanded", String(open));
+}
+settingsBtn.addEventListener("click", () => setSettingsOpen(settingsPanel.hidden));
+// A tap anywhere else closes it.
+window.addEventListener("pointerdown", (e) => {
+  if (!settingsPanel.hidden && !e.target.closest("#settings, #settings-btn")) setSettingsOpen(false);
+});
+
+function applyFaceScale(scale) {
+  faceScaleInput.value = scale;
+  faceScaleValue.textContent = `${scale.toFixed(1)}×`;
+  setFaceScale(scale);
+}
+let savedFaceScale = NaN;
+try { savedFaceScale = parseFloat(localStorage.getItem("faceScale")); } catch {}
+applyFaceScale(Number.isFinite(savedFaceScale) ? savedFaceScale : DEFAULT_FACE_SCALE);
+function saveFaceScale(scale) {
+  applyFaceScale(scale);
+  try { localStorage.setItem("faceScale", String(scale)); } catch {}
+}
+faceScaleInput.addEventListener("input", () => saveFaceScale(parseFloat(faceScaleInput.value)));
+$("#face-scale-default").addEventListener("click", () => saveFaceScale(DEFAULT_FACE_SCALE));
 
 // The face died (lost off screen): it stops mid-sentence and the rest of the reply is dropped.
 onDeath(() => {
