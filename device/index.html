@@ -38,7 +38,15 @@
       </span>
       <input id="face-scale" type="range" min="0.5" max="3" step="0.1">
     </label>
-    <button id="face-scale-default" class="setting-reset" type="button">Reset to default</button>
+    <label class="setting">
+      <span class="setting-head">
+        <span>Distance compensation</span>
+        <output id="distance-compensation-value" for="distance-compensation"></output>
+      </span>
+      <input id="distance-compensation" type="range" min="0" max="1" step="0.05">
+      <span class="setting-hint">How much the face grows as you step back</span>
+    </label>
+    <button id="settings-default" class="setting-reset" type="button">Reset to defaults</button>
   </div>
 
   <footer class="bottom">

@@ -33,6 +33,12 @@ const DEFAULT_SMILEY_SIZE = 0.5;
 // Adjustable from the settings panel (setFaceScale).
 export const DEFAULT_FACE_SCALE = 1.6;
 let faceScale = DEFAULT_FACE_SCALE;
+// Distance compensation: past the distance it was placed from, the face grows by
+// (distance now / then) ^ this, so it doesn't shrink to a speck as you back away. 0 lets it shrink
+// like a real object; 1 keeps it the same size on screen. Adjustable from the settings panel.
+export const DEFAULT_DISTANCE_COMPENSATION = 0.4;
+let distanceCompensation = DEFAULT_DISTANCE_COMPENSATION;
+const MAX_STRETCH = 4; // never more than this many times its placed size
 // The face is drawn on a canvas texture: FACE_UNITS of the drawing (eyes, mouth, brows at rest)
 // span one smiley diameter, and the plane is FACE_PLANE diameters across so bulging eyes, the
 // scream and sweat still fit.
@@ -123,6 +129,7 @@ let placement = null;
 let targetPosition = null;
 let targetQuaternion = null;
 let size = 0.1;
+let stretch = 1; // how much distance compensation is enlarging it right now
 let updates = 0; // frames since start, to space out surface re-checks
 
 // World tracking needs a phone's camera and motion sensors.
@@ -295,10 +302,12 @@ export function placeBox(box, frameId, fit = DEFAULT_SMILEY_SIZE) {
     placement.leash += (depth * REFINE_LEASH - placement.leash) * RELOCATE_BLEND;
     limitTilt(placement.normal.lerp(normal, RELOCATE_BLEND).normalize(), origin.clone().sub(placement.point));
     placement.size += (side - placement.size) * RELOCATE_BLEND;
+    placement.depth += (depth - placement.depth) * RELOCATE_BLEND;
     source += ", blended";
   } else {
     // home and leash: where the box put it, and how far re-checks may move it from there.
-    placement = { point, normal, up, size: side, home: point.clone(), leash: depth * REFINE_LEASH };
+    // depth: how far away it was placed from, the baseline for distance compensation.
+    placement = { point, normal, up, size: side, depth, home: point.clone(), leash: depth * REFINE_LEASH };
   }
   revive();
   aimMarker();
@@ -335,7 +344,7 @@ export function faceOnScreen() {
   const centre = smiley.visible ? smiley.position : targetPosition;
   if (centre.clone().applyMatrix4(camera.matrixWorldInverse).z >= 0) return null;
   const side = new THREE.Vector3(1, 0, 0).transformDirection(camera.matrixWorld);
-  const edge = centre.clone().addScaledVector(side, (smiley.visible ? size : placement.size) / 2);
+  const edge = centre.clone().addScaledVector(side, (smiley.visible ? size * stretch : placement.size) / 2);
   const [c, e] = [centre.clone(), edge].map((v) => {
     v.project(camera);
     return { x: ((v.x + 1) / 2) * innerWidth, y: ((1 - v.y) / 2) * innerHeight };
@@ -359,6 +368,11 @@ export function onScream(callback) {
 export function setFaceScale(scale) {
   if (placement) placement.size = THREE.MathUtils.clamp(placement.size * (scale / faceScale), SMILEY_MIN, SMILEY_MAX);
   faceScale = scale;
+}
+
+// Changes how strongly the face grows as you back away from it (0-1, see DEFAULT_DISTANCE_COMPENSATION).
+export function setDistanceCompensation(amount) {
+  distanceCompensation = amount;
 }
 
 // Calls back when the face is poked on screen.
@@ -742,7 +756,9 @@ function animateMarker(time, camera) {
     smiley.quaternion.slerp(targetQuaternion, FOLLOW);
     size += (placement.size - size) * FOLLOW;
   }
-  smiley.scale.setScalar(size);
+  const distance = camera.position.distanceTo(smiley.position);
+  stretch = THREE.MathUtils.clamp((distance / placement.depth) ** distanceCompensation, 1, MAX_STRETCH);
+  smiley.scale.setScalar(size * stretch);
   feelTheEdges(camera, time);
   if (voice) listen();
   drawFace(time);
