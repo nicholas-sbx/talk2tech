@@ -57,7 +57,7 @@ class GeminiLLM:
             kwargs["thinking_config"] = types.ThinkingConfig(thinking_level=config.GEMINI_THINKING_LEVEL)
         return types.GenerateContentConfig(**kwargs)
 
-    async def _stream(self, **kwargs) -> AsyncIterator[str]:
+    async def _stream(self, what: str, **kwargs) -> AsyncIterator[str]:
         """Stream text from the first model that starts answering in time.
 
         A model that errors (429/5xx) or is silent for GEMINI_TIMEOUT_S is abandoned for the next one
@@ -68,6 +68,10 @@ class GeminiLLM:
 
         now = time.monotonic()
         models = [m for m in self._models if self._skip_until.get(m, 0) <= now] or self._models[-1:]
+        for m in self._models:
+            if m not in models:
+                log.info("[gemini] %s: skipping %s (cooling down %.0fs more)", what, m, self._skip_until[m] - now)
+        start = time.perf_counter()
 
         async def first_chunk(model):
             stream = await self._client.aio.models.generate_content_stream(model=model, **kwargs)
@@ -79,24 +83,34 @@ class GeminiLLM:
 
         for i, model in enumerate(models):
             last = i == len(models) - 1
+            tried = time.perf_counter()
             try:
                 attempt = first_chunk(model)
                 chunks, first = await (attempt if last else asyncio.wait_for(attempt, config.GEMINI_TIMEOUT_S))
                 break
             except (errors.APIError, TimeoutError) as e:
-                reason = f"timed out after {config.GEMINI_TIMEOUT_S:g}s" if isinstance(e, TimeoutError) else e.code
+                reason = "timed out" if isinstance(e, TimeoutError) else f"error {e.code}"
+                elapsed = time.perf_counter() - tried
                 if last or (isinstance(e, errors.APIError) and e.code not in RETRYABLE):
+                    log.error("[gemini] %s: %s %s after %.2fs, no models left", what, model, reason, elapsed)
                     raise
                 self._skip_until[model] = time.monotonic() + config.GEMINI_COOLDOWN_S
-                log.warning("Gemini %s %s, falling back to %s", model, reason, models[i + 1])
+                log.warning(
+                    "[gemini] %s: %s %s after %.2fs, failing over to %s (skipping it for %.0fs)",
+                    what, model, reason, elapsed, models[i + 1], config.GEMINI_COOLDOWN_S,
+                )
 
-        if first is None:
-            return
-        if first.text:
-            yield first.text
-        async for chunk in chunks:
-            if chunk.text:
-                yield chunk.text
+        log.info(
+            "[gemini] %s: %s first words %.2fs (%.2fs total incl. failover)",
+            what, model, time.perf_counter() - tried, time.perf_counter() - start,
+        )
+        if first is not None:
+            if first.text:
+                yield first.text
+            async for chunk in chunks:
+                if chunk.text:
+                    yield chunk.text
+        log.info("[gemini] %s: %s finished %.2fs", what, model, time.perf_counter() - start)
 
     @staticmethod
     def _image_part(image: bytes):
@@ -109,6 +123,7 @@ class GeminiLLM:
         parts = [
             text
             async for text in self._stream(
+                "persona",
                 contents=contents,
                 config=self._config(response_mime_type="application/json", temperature=1.0),
             )
@@ -132,6 +147,7 @@ class GeminiLLM:
         contents.append(types.Content(role="user", parts=parts))
 
         async for text in self._stream(
+            "reply",
             contents=contents,
             config=self._config(
                 system_instruction=persona_system_prompt(persona),
