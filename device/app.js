@@ -46,6 +46,8 @@ $("#start-btn").addEventListener("click", async () => {
   // Must run inside a tap: iOS only unlocks audio playback and camera from a user gesture.
   audioCtx = new (window.AudioContext || window.webkitAudioContext)();
   await audioCtx.resume();
+  // Safari keeps the audio session type across reloads; a leftover "playback" blocks the mic.
+  setAudioSession("auto");
   try {
     const stream = await navigator.mediaDevices.getUserMedia({ video: VIDEO, audio: AUDIO });
     useCamera(new MediaStream(stream.getVideoTracks()));
@@ -191,6 +193,8 @@ function pickMime() {
 function setAudioSession(type) {
   try { if (navigator.audioSession) navigator.audioSession.type = type; } catch {}
 }
+
+addEventListener("pagehide", () => setAudioSession("auto"));
 
 async function openMic() {
   // "auto" becomes play-and-record on its own once capture starts.
