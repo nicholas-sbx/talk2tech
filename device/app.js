@@ -1,7 +1,7 @@
 // talk2tech device client: camera + push-to-talk mic -> backend WebSocket -> spoken replies.
 // Message formats: docs/protocol.md
 
-import { arSupported, requestMotionPermission, startAR, captureFrame, placeBox, clearMarker, inAR, setSpeaking, onDeath, onScream } from "./ar.js";
+import { arSupported, requestMotionPermission, startAR, captureFrame, placeBox, clearMarker, inAR, setSpeaking, onDeath, onScream, onCoaching, skipCoaching } from "./ar.js";
 
 const $ = (sel) => document.querySelector(sel);
 const video = $("#cam");
@@ -19,6 +19,14 @@ const STATUS_TEXT = {
   thinking: "Thinking…",
   speaking: "Speaking… (hold to interrupt)",
 };
+// Worded like iOS's AR coaching. The hint says what kind of movement actually helps.
+const DEVICE_NAME = /iPhone|iPad/.exec(navigator.userAgent)?.[0] ?? (navigator.maxTouchPoints > 1 && /Macintosh/.test(navigator.userAgent) ? "iPad" : "your phone");
+const COACH_TEXT = {
+  start: [`Move ${DEVICE_NAME} to start`, "Slowly slide it side to side, keeping what you want to talk to in view"],
+  continue: [`Move ${DEVICE_NAME} to continue`, "Point it back at where you were"],
+  slow: [`Move ${DEVICE_NAME} more slowly`, "Tracking can't keep up"],
+};
+const COACH_SKIP_AFTER_MS = 10000; // some scenes (a blank wall) never map, so offer a way past
 const PLACEHOLDER = { name: "Point at something", object: "then hold to talk" };
 const MAX_FRAME_SIDE = 768;
 const MIN_CLIP_MS = 300;
@@ -46,6 +54,8 @@ let held = false;
 let recordStart = 0;
 let frameCounter = 0;
 let smileySize; // the current object's smiley diameter, as a share of its width (Gemini's choice)
+let coachSkipTimer = null;
+let coachedOnce = false; // the scene's been mapped once, so later coaching mustn't block taps
 const debugFrames = new Map();
 let audioCtx = null;
 let voice = null; // replies play through this analyser, so the AR face's mouth can follow them
@@ -489,6 +499,26 @@ showTextBtn.addEventListener("click", () => {
   setShowText(on);
   try { localStorage.setItem("showText", on ? "1" : "0"); } catch {}
 });
+
+// Until tracking has mapped the scene, cover the screen asking for the phone to be moved around.
+onCoaching((reason) => {
+  const coach = $("#coach");
+  const skip = $("#coach-skip");
+  coach.classList.toggle("on", Boolean(reason));
+  coach.classList.toggle("passive", coachedOnce);
+  coach.setAttribute("aria-hidden", String(!reason));
+  if (!reason) {
+    coachedOnce = true;
+    clearTimeout(coachSkipTimer);
+    coachSkipTimer = null;
+    skip.hidden = true;
+    return;
+  }
+  coach.dataset.reason = reason;
+  [$("#coach-text").textContent, $("#coach-hint").textContent] = COACH_TEXT[reason];
+  if (!coachedOnce && !coachSkipTimer) coachSkipTimer = setTimeout(() => (skip.hidden = false), COACH_SKIP_AFTER_MS);
+});
+$("#coach-skip").addEventListener("click", skipCoaching);
 
 // The face died (lost off screen): it stops mid-sentence and the rest of the reply is dropped.
 onDeath(() => {

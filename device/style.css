@@ -40,6 +40,7 @@ html, body {
 html.ar #cam { display: none; }
 #ar-canvas { position: fixed; inset: 0; width: 100%; height: 100%; z-index: 0; }
 .top, .bottom, .start, .debug-frame, .ar-debug { z-index: 1; }
+.coach { z-index: 2; }
 
 button { font: inherit; color: inherit; cursor: pointer; }
 button:focus-visible { outline: 2px solid var(--fg); outline-offset: 2px; }
@@ -201,6 +202,63 @@ body:not(.show-text) .line.thing { display: none; }
   overflow-wrap: anywhere;
 }
 .ar-debug[hidden] { display: none; }
+
+/* ---------- move-to-start coaching ---------- */
+
+.coach {
+  position: fixed;
+  inset: 0;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  padding: calc(var(--safe-top) + 24px) 32px calc(var(--safe-bottom) + 24px);
+  background: rgba(0, 0, 0, 0.5);
+  -webkit-backdrop-filter: blur(14px);
+  backdrop-filter: blur(14px);
+  text-align: center;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition: opacity 0.35s ease, visibility 0s linear 0.35s;
+}
+/* Blocks taps until the scene is first mapped; later (tracking lost) it doesn't, so a talk in progress isn't cut off. */
+.coach.on { opacity: 1; visibility: visible; pointer-events: auto; transition: opacity 0.35s ease; }
+.coach.on.passive { pointer-events: none; }
+.coach-art { position: relative; width: 200px; height: 150px; margin-bottom: 28px; perspective: 420px; }
+/* A dotted floor in perspective, for the phone to sweep over. */
+.coach-floor {
+  position: absolute;
+  left: -20px; right: -20px; bottom: -10px; height: 120px;
+  background: radial-gradient(circle, rgba(255, 255, 255, 0.55) 1.2px, transparent 1.8px) 0 0 / 14px 14px;
+  -webkit-mask-image: radial-gradient(ellipse at center, #000 30%, transparent 70%);
+  mask-image: radial-gradient(ellipse at center, #000 30%, transparent 70%);
+  transform: rotateX(70deg);
+}
+.coach-phone {
+  position: absolute;
+  left: calc(50% - 22px); top: 0;
+  width: 44px; height: 80px;
+  fill: rgba(255, 255, 255, 0.08);
+  stroke: var(--fg); stroke-width: 2.5; stroke-linecap: round;
+  animation: coach-sweep 2.4s ease-in-out infinite;
+}
+.coach[data-reason="slow"] .coach-phone { animation-duration: 4.8s; }
+@keyframes coach-sweep {
+  0%, 100% { transform: translateX(-52px) rotateY(28deg); }
+  50% { transform: translateX(52px) rotateY(-28deg); }
+}
+.coach-text { margin: 0; font-size: 22px; font-weight: 600; letter-spacing: -0.01em; text-shadow: var(--shadow); }
+.coach-hint { margin: 8px 0 0; max-width: 280px; font-size: 14px; color: var(--muted); text-shadow: var(--shadow); }
+.coach-skip {
+  position: absolute;
+  bottom: calc(var(--safe-bottom) + 28px);
+  padding: 10px 20px;
+  border: 0; border-radius: 999px;
+  font-size: 14px;
+  background: var(--surface);
+}
+.coach-skip[hidden] { display: none; }
+@media (prefers-reduced-motion: reduce) {
+  .coach-phone { animation: none; }
+}
 
 /* ---------- start screen ---------- */
 

@@ -48,6 +48,17 @@
     <div id="model" class="model"></div>
   </footer>
 
+  <!-- Like iOS's AR coaching: asks for the phone to be moved until tracking has mapped the scene. -->
+  <div id="coach" class="coach" aria-hidden="true">
+    <div class="coach-art" aria-hidden="true">
+      <div class="coach-floor"></div>
+      <svg class="coach-phone" viewBox="0 0 40 72"><rect x="2" y="2" width="36" height="68" rx="8"/><path d="M16 8h8"/></svg>
+    </div>
+    <p id="coach-text" class="coach-text" role="status"></p>
+    <p id="coach-hint" class="coach-hint"></p>
+    <button id="coach-skip" class="coach-skip" hidden>Skip</button>
+  </div>
+
   <div id="start" class="start">
     <div class="wordmark">talk2tech</div>
     <div class="start-body">
