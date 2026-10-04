@@ -147,7 +147,7 @@ class GeminiLLM:
         kwargs["automatic_function_calling"] = types.AutomaticFunctionCallingConfig(disable=True)
         return types.GenerateContentConfig(**kwargs)
 
-    async def _stream(self, what: str, **kwargs) -> tuple[str, AsyncIterator[str]]:
+    async def _stream(self, what: str, attempts: int | None = None, **kwargs) -> tuple[str, AsyncIterator[str]]:
         """Whichever model starts answering first: its name, and its text as it streams.
 
         Gemini latency under load is spiky per request rather than per model, so instead of waiting
@@ -158,7 +158,8 @@ class GeminiLLM:
         from google.genai import errors
 
         start = time.perf_counter()
-        plan = [self._models[i % len(self._models)] for i in range(config.GEMINI_MAX_ATTEMPTS)]
+        attempt_count = attempts or config.GEMINI_MAX_ATTEMPTS
+        plan = [self._models[i % len(self._models)] for i in range(attempt_count)]
 
         async def first_chunk(model):
             stream = await self._client.aio.models.generate_content_stream(model=model, **kwargs)
@@ -298,6 +299,7 @@ class GeminiLLM:
         try:
             _, evaluation_stream = await self._stream(
                 "reply evaluation",
+                attempts=1,
                 contents=[reply_evaluation_prompt(persona, user_text, candidate)],
                 config=self._config(
                     response_mime_type="application/json",
