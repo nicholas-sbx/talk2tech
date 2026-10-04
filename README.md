@@ -64,6 +64,15 @@ streamlit run dashboard/app.py
 
 Reads `data/events.jsonl`.
 
+When the dashboard is running locally, open the XRviewer with `?debug` to reveal a low-key
+**Analytics** link on the start screen. It opens Streamlit on port `8501`; the dashboard still
+runs as a separate process and is not exposed through the FastAPI app or the phone tunnel.
+
+The dashboard shows object and session counts, conversation turns, object interaction frequency,
+turn success rate, turn errors, average time to first audio, and the active mock/real LLM and voice
+backends. Timing and backend metrics are recorded for turns completed after this instrumentation
+is deployed; older events remain visible but do not contain those fields.
+
 ## Team habits
 
 - `main` always runs the demo. Short branches, small merges.

@@ -44,6 +44,7 @@ class Session:
         # Re-finds the object in each turn's frame so the device can re-anchor its AR marker.
         self._locating: asyncio.Task | None = None
         self._turn_start = 0.0
+        self._first_audio_ms: float | None = None
         self._send_lock = asyncio.Lock()
 
     async def send(self, msg: dict) -> None:
@@ -89,10 +90,16 @@ class Session:
             self._cancel_waking()
             self._cancel_locating()
 
-    def _start_waking(self, image: bytes | None, frame_id: str | None, focus: str | None = None) -> None:
+    def _start_waking(
+        self,
+        image: bytes | None,
+        frame_id: str | None,
+        focus: str | None = None,
+        user_text: str | None = None,
+    ) -> None:
         """Begin generating the persona while the user is still talking."""
         if self.persona is None and self._waking is None:
-            self._waking = asyncio.create_task(self.llm.make_persona(image, focus))
+            self._waking = asyncio.create_task(self.llm.make_persona(image, focus, user_text))
             self._waking_frame = frame_id if image else None
 
     def _cancel_waking(self) -> None:
@@ -137,6 +144,7 @@ class Session:
         # A new turn interrupts whatever the object was saying.
         self._cancel_turn()
         self._turn_start = time.perf_counter()
+        self._first_audio_ms = None
         self._turn = asyncio.create_task(self._guarded(coro))
 
     def _cancel_turn(self) -> None:
@@ -159,6 +167,12 @@ class Session:
         log.info("[timing] speech-to-text %.2fs", time.perf_counter() - self._turn_start)
         if not text:
             await self.send({"type": "error", "message": "Didn't catch that. Try again?"})
+            self.memory.log(
+                self.id,
+                "turn_error",
+                self.persona["name"] if self.persona else "unknown",
+                {"status": "empty_transcription", "llm": type(self.llm).__name__, "voice": type(self.voice).__name__},
+            )
             await self.status("idle")
             return
         await self._respond(text, _decode(msg.get("image")), msg.get("frame_id"))
@@ -201,7 +215,7 @@ class Session:
 
         try:
             if self.persona is None:
-                await self._birth(image, frame_id, lambda s: say(s, record=False), focus)
+                await self._birth(image, frame_id, lambda s: say(s, record=False), focus, user_text)
 
             await self.status("thinking")
             model, words = await self.llm.reply_stream(self.persona, self.history, user_text, image)
@@ -221,6 +235,22 @@ class Session:
             for task in pending_tts:
                 task.cancel()
             if isinstance(exc, asyncio.CancelledError):
+                status = "interrupted"
+            else:
+                status = "error"
+            self.memory.log(
+                self.id,
+                "turn_error",
+                self.persona["name"] if self.persona else "unknown",
+                {
+                    "status": status,
+                    "error": type(exc).__name__ if status == "error" else None,
+                    "llm": type(self.llm).__name__,
+                    "voice": type(self.voice).__name__,
+                    "duration_ms": round((time.perf_counter() - self._turn_start) * 1000),
+                },
+            )
+            if isinstance(exc, asyncio.CancelledError):
                 with contextlib.suppress(Exception):  # the socket may already be closed
                     await self.send({"type": "stop"})
             raise
@@ -229,12 +259,36 @@ class Session:
         self.history += [{"role": "user", "text": user_text}, {"role": "model", "text": reply_text}]
         self.history = self.history[-MAX_HISTORY:]
         name = self.persona["name"]
-        self.memory.log(self.id, "turn", name, {"user": user_text, "reply": reply_text})
+        self.memory.log(
+            self.id,
+            "turn",
+            name,
+            {
+                "user": user_text,
+                "reply": reply_text,
+                "status": "success",
+                "time_to_first_audio_ms": self._first_audio_ms,
+                "duration_ms": round((time.perf_counter() - self._turn_start) * 1000),
+                "llm": type(self.llm).__name__,
+                "voice": type(self.voice).__name__,
+            },
+        )
 
-    async def _birth(self, image: bytes | None, frame_id: str | None, say, focus: str | None = None) -> None:
+    async def _birth(
+        self,
+        image: bytes | None,
+        frame_id: str | None,
+        say,
+        focus: str | None = None,
+        user_text: str | None = None,
+    ) -> None:
         """First sight of an object: identify it and give it a personality and voice."""
         await self.status("waking")
-        self._start_waking(image, frame_id, focus)  # no-op if the button press already started it
+        if user_text and self._waking is not None:
+            # The frame message starts persona generation early, before transcription is ready.
+            # Restart it once with the user's first words so birth can use that context.
+            self._cancel_waking()
+        self._start_waking(image, frame_id, focus, user_text)
         try:
             # Shielded so an interrupted turn doesn't throw away a persona that's nearly ready.
             persona = await asyncio.shield(self._waking)
@@ -264,6 +318,7 @@ class Session:
             sentence, tts = item
             audio = await tts
             if first:
+                self._first_audio_ms = round((time.perf_counter() - self._turn_start) * 1000)
                 log.info("[timing] first audio %.2fs after release", time.perf_counter() - self._turn_start)
                 await self.status("speaking")
                 first = False

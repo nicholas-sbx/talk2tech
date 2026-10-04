@@ -10,6 +10,7 @@ const statusEl = $("#status");
 const captions = $("#captions");
 const textForm = $("#text-form");
 const textInput = $("#text-input");
+const dashboardLink = $("#dashboard-link");
 
 const STATUS_TEXT = {
   idle: "Hold to talk",
@@ -31,6 +32,17 @@ const TEXT_HIDE_DELAY_MS = 300;
 const DEBUG = new URLSearchParams(location.search).has("debug");
 const DEBUG_FRAMES_KEPT = 10;
 const arAvailable = arSupported();
+
+if (DEBUG) {
+  const dashboardUrl = new URL(location.href);
+  dashboardUrl.protocol = "http:";
+  dashboardUrl.port = "8501";
+  dashboardUrl.pathname = "/";
+  dashboardUrl.search = "";
+  dashboardUrl.hash = "";
+  dashboardLink.href = dashboardUrl.href;
+  dashboardLink.hidden = false;
+}
 
 let ws;
 let camStream = null;

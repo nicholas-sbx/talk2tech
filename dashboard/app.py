@@ -36,11 +36,34 @@ if df.empty:
 df["ts"] = pd.to_datetime(df["ts"])
 objects = df[df["kind"] == "object"]
 turns = df[df["kind"] == "turn"]
+turn_errors = df[df["kind"] == "turn_error"]
+successful_turns = turns[turns["payload"].map(lambda p: p.get("status") == "success")]
+attempted_turns = len(successful_turns) + len(turn_errors)
+success_rate = len(successful_turns) / attempted_turns * 100 if attempted_turns else 0
+latencies = pd.to_numeric(
+    successful_turns["payload"].map(lambda p: p.get("time_to_first_audio_ms")),
+    errors="coerce",
+).dropna()
 
-c1, c2, c3 = st.columns(3)
+backend_counts = (
+    successful_turns["payload"]
+    .map(lambda p: f'{p.get("llm", "unknown")} + {p.get("voice", "unknown")}')
+    .value_counts()
+)
+
+c1, c2, c3, c4, c5, c6 = st.columns(6)
 c1.metric("Objects awakened", len(objects))
 c2.metric("Conversation turns", len(turns))
 c3.metric("Sessions", df["session_id"].nunique())
+c4.metric("Turn success rate", f"{success_rate:.0f}%")
+c5.metric("Avg first audio", f"{latencies.mean():.0f} ms" if not latencies.empty else "—")
+c6.metric("Turn errors", len(turn_errors))
+
+st.subheader("Active backends")
+if backend_counts.empty:
+    st.info("Backend usage will appear after a completed turn.")
+else:
+    st.bar_chart(backend_counts)
 
 st.subheader("Most talked-to objects")
 st.bar_chart(turns["object_name"].value_counts().head(10))
