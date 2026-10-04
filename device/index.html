@@ -61,6 +61,10 @@
     </div>
   </div>
 
-  <script src="app.js"></script>
+  <canvas id="debug-frame" class="debug-frame" hidden></canvas>
+
+  <!-- Three.js is only fetched (by ar.js) when a WebXR AR session starts. -->
+  <script type="importmap">{ "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js" } }</script>
+  <script type="module" src="app.js"></script>
 </body>
 </html>
