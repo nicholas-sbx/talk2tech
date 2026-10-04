@@ -1,7 +1,7 @@
 // talk2tech device client: camera + push-to-talk mic -> backend WebSocket -> spoken replies.
 // Message formats: docs/protocol.md
 
-import { arSupported, requestMotionPermission, startAR, captureFrame, placeBox, clearMarker, inAR, setSpeaking, onDeath, onScream } from "./ar.js";
+import { arSupported, requestMotionPermission, startAR, captureFrame, placeBox, clearMarker, inAR, setSpeaking, onDeath, onScream, onSlap, triggerSlap } from "./ar.js";
 
 const $ = (sel) => document.querySelector(sel);
 const video = $("#cam");
@@ -506,6 +506,58 @@ onScream((on) => {
 
 function untilCalm() {
   return screaming ? new Promise((resolve) => calmWaiters.push(resolve)) : Promise.resolve();
+}
+
+// Progressive anger state for physical force / slap interactions
+let angerLevel = 0;
+let lastSlapTimestamp = 0;
+const ANGER_DECAY_MS = 15000;
+const SLAP_TRIGGER_DEBOUNCE_MS = 1000;
+
+function handleSlap() {
+  const now = performance.now();
+  if (now - lastSlapTimestamp < SLAP_TRIGGER_DEBOUNCE_MS) return;
+  if (now - lastSlapTimestamp > ANGER_DECAY_MS) {
+    angerLevel = 0;
+  }
+  angerLevel = Math.min(3, angerLevel + 1);
+  lastSlapTimestamp = now;
+
+  stopSpeech();
+  triggerSlap(angerLevel);
+
+  const slapDescriptions = {
+    1: "*slaps object*",
+    2: "*slaps object again*",
+    3: "*slaps object repeatedly*",
+  };
+  thingLine = null;
+  line("user", slapDescriptions[angerLevel] || "*slaps object*");
+
+  grabFrame().then((frame) => {
+    send({
+      type: "slap",
+      anger_level: angerLevel,
+      image: frame.image,
+      frame_id: frame.frameId,
+    });
+  });
+}
+
+onSlap(() => handleSlap());
+
+// Desktop / dev fallback: 'S' key triggers slap when not typing in the text box
+window.addEventListener("keydown", (e) => {
+  if ((e.key === "s" || e.key === "S") && !e.ctrlKey && !e.altKey && !e.metaKey) {
+    if (document.activeElement === textInput) return;
+    handleSlap();
+  }
+});
+
+const debugSlapBtn = $("#debug-slap");
+if (debugSlapBtn) {
+  debugSlapBtn.hidden = !DEBUG;
+  debugSlapBtn.addEventListener("click", () => handleSlap());
 }
 
 $("#reset").addEventListener("click", () => {

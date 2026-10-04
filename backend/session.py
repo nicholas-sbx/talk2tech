@@ -74,6 +74,10 @@ class Session:
                 elif kind == "text":
                     image, frame_id = _decode(msg.get("image")), msg.get("frame_id")
                     self._start_turn(self._respond(msg.get("text", "").strip(), image, frame_id))
+                elif kind == "slap":
+                    anger_level = int(msg.get("anger_level", 1))
+                    image, frame_id = _decode(msg.get("image")), msg.get("frame_id")
+                    self._start_turn(self._slap_turn(anger_level, image, frame_id))
                 elif kind == "interrupt":
                     self._cancel_turn()
                 elif kind == "reset":
@@ -162,6 +166,16 @@ class Session:
             await self.status("idle")
             return
         await self._respond(text, _decode(msg.get("image")), msg.get("frame_id"))
+
+    async def _slap_turn(self, anger_level: int, image: bytes | None, frame_id: str | None) -> None:
+        """Physical force / slap reaction turn at the given anger escalation level."""
+        slap_prompts = {
+            1: "*I just slapped you!* React in character with sudden shock, pain, or surprise in one short sentence.",
+            2: "*I just slapped you again!* React in character with sharp indignation and tell me to stop hitting you in one short sentence.",
+            3: "*I slapped you repeatedly!* React in character with absolute fury, outrage, and refusal to tolerate being hit in one short sentence.",
+        }
+        prompt = slap_prompts.get(anger_level, slap_prompts[1])
+        await self._respond(prompt, image, frame_id, echo=False)
 
     async def _respond(
         self,

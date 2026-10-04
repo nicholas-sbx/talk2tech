@@ -76,6 +76,15 @@ let deathListener = null;
 let screamListener = null;
 let screaming = false;
 let lastScream = 0;
+let slapListener = null;
+let lastCameraPos = null;
+let lastCameraQuat = null;
+let isCameraSteady = false;
+let roiBuffer = null;
+let prevRoi = null;
+let lastSlapTriggerTime = 0;
+const SLAP_OPTICAL_THRESHOLD = 26.0;
+const SLAP_DEBOUNCE_MS = 1200;
 
 // Camera pose, projection and 3D points for each frame we sent, so a box that arrives seconds
 // later still maps onto the world the way it was when the photo was taken.
@@ -85,7 +94,7 @@ let captureWaiters = [];
 let reality = null; // this frame's tracking output
 
 // ?debug: what the AR pipeline did, shown on screen since phones have no console.
-const stats = { sent: 0, unreadable: 0, boxes: 0, lastBox: "none yet", refines: 0, lastRefine: "" };
+const stats = { sent: 0, unreadable: 0, boxes: 0, lastBox: "none yet", refines: 0, lastRefine: "", opticalDiff: "", slaps: 0 };
 let statsShown = 0;
 
 // Where the smiley sits: a point on the surface, the surface normal (towards the camera), the
@@ -290,6 +299,17 @@ export function onDeath(callback) {
 // pause for it.
 export function onScream(callback) {
   screamListener = callback;
+}
+
+// Calls back when a physical slap / object movement is detected by the camera.
+export function onSlap(callback) {
+  slapListener = callback;
+}
+
+// Triggers visual and procedural audio slap reaction.
+export function triggerSlap(angerLevel = 1) {
+  audio?.playSlapSound();
+  face.triggerSlap(angerLevel);
 }
 
 function setScreaming(on) {
@@ -523,8 +543,9 @@ function showStats() {
     const mood = face.isDead ? "dead" : `panic ${face.panic.toFixed(2)}`;
     markerState = `${where}, ${mood}, ${stats.refines} surface re-checks (last: ${stats.lastRefine || "none"})`;
   }
+  const motionState = `camera: ${isCameraSteady ? "steady" : "moving"}, diff: ${stats.opticalDiff || "0"}, slaps: ${stats.slaps || 0}`;
   el.textContent = [
-    `tracking: ${tracking}`,
+    `tracking: ${tracking} (${motionState})`,
     `frames sent: ${stats.sent}, unreadable: ${stats.unreadable}, boxes: ${stats.boxes}`,
     `last box: ${stats.lastBox}`,
     `smiley: ${markerState}`,
@@ -594,10 +615,81 @@ function sceneModule() {
       XR8.XrController.updateCameraProjectionMatrix({ origin: camera.position, facing: camera.quaternion });
     },
     onUpdate: () => {
-      if (++updates % REFINE_EVERY === 0) refineOnSurface(XR8.Threejs.xrScene().camera);
-      animateMarker(performance.now(), XR8.Threejs.xrScene().camera);
+      const { camera } = XR8.Threejs.xrScene();
+      checkCameraStability(camera);
+      if (++updates % REFINE_EVERY === 0) refineOnSurface(camera);
+      animateMarker(performance.now(), camera);
+      detectObjectPhysicalMotion(camera);
     },
   };
+}
+
+function checkCameraStability(camera) {
+  if (!THREE || !camera) return;
+  camera.updateMatrixWorld();
+  const camPos = new THREE.Vector3().setFromMatrixPosition(camera.matrixWorld);
+  const camQuat = new THREE.Quaternion().setFromRotationMatrix(camera.matrixWorld);
+  if (!lastCameraPos) {
+    lastCameraPos = camPos.clone();
+    lastCameraQuat = camQuat.clone();
+    return;
+  }
+  const linearVel = camPos.distanceTo(lastCameraPos);
+  const dot = Math.min(1, Math.max(-1, camQuat.dot(lastCameraQuat)));
+  const angularVel = 2 * Math.acos(Math.abs(dot));
+  isCameraSteady = linearVel < 0.012 && angularVel < 0.025;
+  lastCameraPos.copy(camPos);
+  lastCameraQuat.copy(camQuat);
+}
+
+function detectObjectPhysicalMotion(camera) {
+  if (!running || !gl || !placement || !smiley || !smiley.visible || !isCameraSteady) {
+    prevRoi = null;
+    return;
+  }
+  camera.updateMatrixWorld();
+  const at = smiley.position.clone().project(camera);
+  if (at.z >= 1 || Math.abs(at.x) > 0.95 || Math.abs(at.y) > 0.95) {
+    prevRoi = null;
+    return;
+  }
+  const u = (at.x + 1) / 2;
+  const v = (1 - at.y) / 2;
+  const width = gl.drawingBufferWidth;
+  const height = gl.drawingBufferHeight;
+  const px = Math.floor(u * width);
+  const py = Math.floor((1 - v) * height);
+
+  const patchSize = 16;
+  const half = patchSize / 2;
+  const rx = Math.max(0, Math.min(width - patchSize, px - half));
+  const ry = Math.max(0, Math.min(height - patchSize, py - half));
+
+  if (!roiBuffer) roiBuffer = new Uint8Array(patchSize * patchSize * 4);
+  const bound = gl.getParameter(gl.FRAMEBUFFER_BINDING);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.readPixels(rx, ry, patchSize, patchSize, gl.RGBA, gl.UNSIGNED_BYTE, roiBuffer);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, bound);
+
+  if (prevRoi) {
+    let diffSum = 0;
+    for (let i = 0; i < roiBuffer.length; i += 4) {
+      const lum = (roiBuffer[i] + roiBuffer[i + 1] + roiBuffer[i + 2]) / 3;
+      const prevLum = (prevRoi[i] + prevRoi[i + 1] + prevRoi[i + 2]) / 3;
+      diffSum += Math.abs(lum - prevLum);
+    }
+    const avgDiff = diffSum / (patchSize * patchSize);
+    stats.opticalDiff = avgDiff.toFixed(1);
+
+    const now = performance.now();
+    if (avgDiff > SLAP_OPTICAL_THRESHOLD && now - lastSlapTriggerTime > SLAP_DEBOUNCE_MS) {
+      lastSlapTriggerTime = now;
+      stats.slaps = (stats.slaps || 0) + 1;
+      slapListener?.();
+    }
+  }
+  if (!prevRoi) prevRoi = new Uint8Array(patchSize * patchSize * 4);
+  prevRoi.set(roiBuffer);
 }
 
 // ---------- the smiley ----------
