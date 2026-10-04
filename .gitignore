@@ -21,3 +21,6 @@ Thumbs.db
 # Cloudflare tunnel secrets
 cloudflared/credentials.json
 cloudflared/*.pem
+
+.agents/
+

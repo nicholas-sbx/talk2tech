@@ -246,7 +246,15 @@ class MockLLM:
     async def reply_stream(
         self, persona: dict, history: list[dict], user_text: str, image: bytes | None
     ) -> AsyncIterator[str]:
-        reply = f"You said: {user_text}. Fascinating. Now, is anyone going to fill me with coffee or not?"
+        if "slapped" in user_text.lower():
+            if "repeatedly" in user_text.lower():
+                reply = "That's it! You're a monster! One more smack and I'm cracking on purpose!"
+            elif "again" in user_text.lower():
+                reply = "Stop hitting me! I'm not a stress ball! Keep your hands to yourself!"
+            else:
+                reply = "Ow! Hey! What did you do that for?! My glaze is delicate!"
+        else:
+            reply = f"You said: {user_text}. Fascinating. Now, is anyone going to fill me with coffee or not?"
         for word in reply.split(" "):
             await asyncio.sleep(0.03)
             yield word + " "

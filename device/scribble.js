@@ -305,6 +305,62 @@ export class ProceduralAudio {
     } catch (e) {}
   }
 
+  /**
+   * Cartoon slap sound: crisp whipcrack / snap transient + resonant physical thud
+   */
+  playSlapSound() {
+    if (!this.ensureContext()) return;
+    const now = this.ctx.currentTime;
+
+    // 1. High transient snap / whipcrack
+    const sampleRate = this.ctx.sampleRate || 44100;
+    const bufferSize = Math.max(1, Math.floor(sampleRate * 0.08));
+    const noiseBuffer = this.ctx.createBuffer(1, bufferSize, sampleRate);
+    const output = noiseBuffer.getChannelData(0);
+    for (let i = 0; i < bufferSize; i++) {
+      output[i] = (Math.random() * 2 - 1) * Math.exp(-i / (bufferSize * 0.15));
+    }
+
+    const crackSource = this.ctx.createBufferSource();
+    crackSource.buffer = noiseBuffer;
+
+    const crackFilter = this.ctx.createBiquadFilter();
+    crackFilter.type = "bandpass";
+    crackFilter.frequency.setValueAtTime(2400, now);
+    crackFilter.Q.setValueAtTime(1.8, now);
+
+    const crackGain = this.ctx.createGain();
+    crackGain.gain.setValueAtTime(0.7, now);
+    crackGain.gain.exponentialRampToValueAtTime(0.001, now + 0.08);
+
+    crackSource.connect(crackFilter);
+    crackFilter.connect(crackGain);
+    crackGain.connect(this.masterGain || this.ctx.destination);
+
+    try {
+      crackSource.start(now);
+      crackSource.stop(now + 0.09);
+    } catch (e) {}
+
+    // 2. Low-mid resonant body thud
+    const thud = this.ctx.createOscillator();
+    const thudGain = this.ctx.createGain();
+    thud.type = "triangle";
+    thud.frequency.setValueAtTime(180, now);
+    thud.frequency.exponentialRampToValueAtTime(45, now + 0.16);
+
+    thudGain.gain.setValueAtTime(0.65, now);
+    thudGain.gain.exponentialRampToValueAtTime(0.001, now + 0.18);
+
+    thud.connect(thudGain);
+    thudGain.connect(this.masterGain || this.ctx.destination);
+
+    try {
+      thud.start(now);
+      thud.stop(now + 0.2);
+    } catch (e) {}
+  }
+
   reset() {
     if (this.deathTimer) {
       clearTimeout(this.deathTimer);
@@ -351,8 +407,20 @@ export class ScribbleFace {
     this.isDead = false;
     this.gazeDirection = { x: 0, y: 0 }; // Looking direction
 
+    // Slap / physical recoil animation state
+    this.slapRecoil = 0; // 0.0 to 1.0 (damped spring recoil)
+    this.slapAnger = 0; // 0 = calm, 1 = surprised/dazed, 2 = annoyed, 3 = furious
+    this.lastSlapTime = 0;
+    this._lastUpdate = 0;
+
     // Pre-cached scribble jitter tables for deterministic 12 FPS boil
     this.boilTables = this.generateBoilTables();
+  }
+
+  triggerSlap(angerLevel = 1, now = performance.now()) {
+    this.slapRecoil = 1.0;
+    this.slapAnger = Math.max(1, Math.min(3, angerLevel));
+    this.lastSlapTime = now;
   }
 
   generateBoilTables() {
@@ -380,6 +448,12 @@ export class ScribbleFace {
       this.boilFrame = (this.boilFrame + 1) % 4;
       this.lastBoilTime = now;
     }
+
+    if (this.slapRecoil > 0.001) {
+      const dt = now - (this._lastUpdate || now);
+      this.slapRecoil = Math.max(0, this.slapRecoil - dt * 0.002);
+    }
+    this._lastUpdate = now;
 
     if (this.speaking) {
       // Mouth flaps at ~6.5 Hz human speech rate (2 * PI * 6.5 / 1000 rad/ms)
@@ -431,6 +505,26 @@ export class ScribbleFace {
     ctx.stroke();
   }
 
+  drawDizzyPupil(ctx, cx, cy, radius, now) {
+    const rot = (now / 180) % (Math.PI * 2);
+    ctx.save();
+    ctx.strokeStyle = "#141414";
+    ctx.lineWidth = 2.4;
+    ctx.beginPath();
+    const loops = 2.5;
+    const steps = 32;
+    for (let i = 0; i <= steps; i++) {
+      const theta = rot + (i / steps) * Math.PI * 2 * loops;
+      const r = (i / steps) * radius;
+      const x = cx + Math.cos(theta) * r;
+      const y = cy + Math.sin(theta) * r;
+      if (i === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+    ctx.restore();
+  }
+
   /**
    * Main rendering method on 2D context at (cx, cy)
    */
@@ -449,8 +543,21 @@ export class ScribbleFace {
         shakeY = (Math.random() - 0.5) * shakeMag;
       }
 
-      ctx.translate(cx + shakeX, cy + shakeY);
-      ctx.scale(scale, scale);
+      // Slap recoil physics: damped harmonic squash-and-stretch oscillation
+      let squashX = 1.0;
+      let squashY = 1.0;
+      let slapShakeX = 0;
+      const elapsedSinceSlap = now - this.lastSlapTime;
+      if (this.slapRecoil > 0.01 && elapsedSinceSlap < 1800) {
+        const decay = Math.exp(-elapsedSinceSlap / 250);
+        const osc = Math.sin(elapsedSinceSlap / 35);
+        squashX = 1.0 + 0.35 * decay * osc;
+        squashY = 1.0 - 0.25 * decay * osc;
+        slapShakeX = 16 * decay * Math.sin(elapsedSinceSlap / 22);
+      }
+
+      ctx.translate(cx + shakeX + slapShakeX, cy + shakeY);
+      ctx.scale(scale * squashX, scale * squashY);
 
       // Line style: hand-drawn sketchy ink
       ctx.lineCap = "round";
@@ -462,16 +569,20 @@ export class ScribbleFace {
       if (this.isDead) {
         this.drawDeadFace(ctx);
       } else {
-        this.drawLivingFace(ctx);
+        this.drawLivingFace(ctx, now);
       }
 
       ctx.restore();
     }
   }
 
-  drawLivingFace(ctx) {
-    // Bulge eyes proportional to panic (up to 2.2x scale)
-    const bulge = 1.0 + this.panic * 1.25;
+  drawLivingFace(ctx, now = performance.now()) {
+    const elapsedSinceSlap = now - this.lastSlapTime;
+    const isSlapped = this.slapAnger >= 1 && elapsedSinceSlap < 4000;
+
+    // Bulge eyes proportional to panic (up to 2.2x scale) or slap surprise
+    const slapEyeBulge = (isSlapped && this.slapAnger === 1) ? 0.35 : 0;
+    const bulge = 1.0 + this.panic * 1.25 + slapEyeBulge;
     const eyeSpacing = 36 * (1.0 + this.panic * 0.15);
     const eyeRadiusX = 16 * bulge;
     const eyeRadiusY = (19 + Math.sin(this.boilFrame) * 1.5) * bulge;
@@ -479,6 +590,30 @@ export class ScribbleFace {
     const leftEyeX = -eyeSpacing;
     const rightEyeX = eyeSpacing;
     const eyeY = -12;
+
+    // Red cheek flush & angry mark when furious (Anger Level 3)
+    if (isSlapped && this.slapAnger === 3) {
+      ctx.save();
+      ctx.fillStyle = "rgba(239, 68, 68, 0.35)";
+      ctx.beginPath();
+      ctx.ellipse(leftEyeX - 6, eyeY + 22, 14, 8, 0, 0, Math.PI * 2);
+      ctx.ellipse(rightEyeX + 6, eyeY + 22, 14, 8, 0, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Cartoon angry vein / pop mark on upper right
+      const vb = this.getBoil(15);
+      ctx.strokeStyle = "#dc2626";
+      ctx.lineWidth = 2.8;
+      const vx = rightEyeX + eyeRadiusX + 8 + vb.dx;
+      const vy = eyeY - eyeRadiusY - 8 + vb.dy;
+      ctx.beginPath();
+      ctx.arc(vx - 5, vy, 5, Math.PI * 0.6, Math.PI * 1.9);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(vx + 5, vy, 5, Math.PI * 1.1, Math.PI * 0.4);
+      ctx.stroke();
+      ctx.restore();
+    }
 
     // 1. Sketched eye loops
     // Outer sketchy fill
@@ -496,8 +631,7 @@ export class ScribbleFace {
     this.drawScribbleLoop(ctx, rightEyeX, eyeY, eyeRadiusX * 0.95, eyeRadiusY * 0.95, 7, 1.5, 31);
     ctx.restore();
 
-    // 2. Looking pupils
-    // When panicking, pupils pinpoint / shrink and dart frantically
+    // 2. Looking pupils or dizzy spirals
     const pupilRadius = Math.max(3.0, (7.0 - this.panic * 4.0));
     let pupilOffsetX = this.gazeDirection.x * 6;
     let pupilOffsetY = this.gazeDirection.y * 6;
@@ -508,19 +642,43 @@ export class ScribbleFace {
       pupilOffsetY += (Math.cos(this.boilFrame * 3.1) * 4) * this.panic;
     }
 
-    ctx.fillStyle = "#111111";
-    this.drawScribbleLoop(ctx, leftEyeX + pupilOffsetX, eyeY + pupilOffsetY, pupilRadius, pupilRadius, 6, 0.8, 5);
-    ctx.fill();
-    this.drawScribbleLoop(ctx, rightEyeX + pupilOffsetX, eyeY + pupilOffsetY, pupilRadius, pupilRadius, 6, 0.8, 29);
-    ctx.fill();
+    if (isSlapped && this.slapAnger === 1) {
+      // Dazed spiral loops (@_@)
+      this.drawDizzyPupil(ctx, leftEyeX + pupilOffsetX, eyeY + pupilOffsetY, pupilRadius * 1.6, now);
+      this.drawDizzyPupil(ctx, rightEyeX + pupilOffsetX, eyeY + pupilOffsetY, pupilRadius * 1.6, now + 100);
+    } else {
+      ctx.fillStyle = "#111111";
+      this.drawScribbleLoop(ctx, leftEyeX + pupilOffsetX, eyeY + pupilOffsetY, pupilRadius, pupilRadius, 6, 0.8, 5);
+      ctx.fill();
+      this.drawScribbleLoop(ctx, rightEyeX + pupilOffsetX, eyeY + pupilOffsetY, pupilRadius, pupilRadius, 6, 0.8, 29);
+      ctx.fill();
+    }
 
-    // 3. Tiltable eyebrows (with asymmetric boil seed offset for authentic sketchiness)
-    // Neutral: slight slope. Panicked: steeply arched upward in terror!
+    // 3. Tiltable eyebrows
     const browY = eyeY - eyeRadiusY - 10;
-    const browTilt = this.panic > 0.1 ? 0.65 * this.panic : 0.08;
+    let leftBrowTilt, rightBrowTilt;
+    if (isSlapped) {
+      if (this.slapAnger === 1) {
+        // Shock / confusion: high arched brows
+        leftBrowTilt = 0.25;
+        rightBrowTilt = -0.25;
+      } else if (this.slapAnger === 2) {
+        // Annoyed scowl: V-shape angle
+        leftBrowTilt = -0.45;
+        rightBrowTilt = 0.45;
+      } else {
+        // Furious scowl
+        leftBrowTilt = -0.65;
+        rightBrowTilt = 0.65;
+      }
+    } else {
+      const browTilt = this.panic > 0.1 ? 0.65 * this.panic : 0.08;
+      leftBrowTilt = -browTilt;
+      rightBrowTilt = browTilt;
+    }
 
-    this.drawEyebrow(ctx, leftEyeX, browY, -browTilt, 1.0 + this.panic * 0.5, 0);
-    this.drawEyebrow(ctx, rightEyeX, browY, browTilt, 1.0 + this.panic * 0.5, 17);
+    this.drawEyebrow(ctx, leftEyeX, browY, leftBrowTilt, 1.0 + this.panic * 0.5, 0);
+    this.drawEyebrow(ctx, rightEyeX, browY, rightBrowTilt, 1.0 + this.panic * 0.5, 17);
 
     // 4. Expressive mouth with reactive lip-sync flapping or screaming
     const mouthY = 28 + this.panic * 6;
@@ -545,6 +703,33 @@ export class ScribbleFace {
       ctx.fillStyle = "#222222";
       this.drawScribbleLoop(ctx, 0, mouthY, mouthW, mouthH, 8, 1.4, 13);
       ctx.fill();
+    } else if (isSlapped) {
+      if (this.slapAnger === 1) {
+        // Wavy squiggly dazed mouth
+        const b1 = this.getBoil(10);
+        const b2 = this.getBoil(20);
+        ctx.beginPath();
+        ctx.moveTo(-16 + b1.dx, mouthY + b1.dy);
+        ctx.quadraticCurveTo(-6, mouthY - 8 + b2.dy, 0, mouthY + 2);
+        ctx.quadraticCurveTo(6, mouthY + 8 + b1.dy, 16 + b2.dx, mouthY - 4);
+        ctx.stroke();
+      } else if (this.slapAnger === 2) {
+        // Clenched zigzag grimace
+        ctx.beginPath();
+        ctx.moveTo(-16, mouthY);
+        ctx.lineTo(-8, mouthY - 4);
+        ctx.lineTo(0, mouthY + 4);
+        ctx.lineTo(8, mouthY - 4);
+        ctx.lineTo(16, mouthY);
+        ctx.stroke();
+      } else {
+        // Furious open grimace/scowl
+        const mouthW = 20;
+        const mouthH = 12;
+        ctx.fillStyle = "#1e1e1e";
+        this.drawScribbleLoop(ctx, 0, mouthY, mouthW, mouthH, 6, 1.5, 9);
+        ctx.fill();
+      }
     } else {
       // Calm resting scribble smile with line boil across entire stroke
       const b1 = this.getBoil(12);
@@ -556,8 +741,8 @@ export class ScribbleFace {
       ctx.stroke();
     }
 
-    // 5. Sweat droplets when scared
-    if (this.panic > 0.3) {
+    // 5. Sweat droplets when scared or dazed
+    if (this.panic > 0.3 || (isSlapped && this.slapAnger === 1)) {
       this.drawSweatDrop(ctx, rightEyeX + eyeRadiusX + 8, browY - 6);
     }
   }
