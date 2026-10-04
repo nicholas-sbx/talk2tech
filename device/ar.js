@@ -325,6 +325,16 @@ function sceneModule() {
       scene.add(makeCube());
       camera.position.set(0, CAMERA_HEIGHT, 0);
       XR8.XrController.updateCameraProjectionMatrix({ origin: camera.position, facing: camera.quaternion });
+      // ?debug: a fixed red cube 1 m ahead of where you started, to check rendering and tracking
+      // separately from placing the real one.
+      if (DEBUG) {
+        const marker = new THREE.Mesh(
+          new THREE.BoxGeometry(0.15, 0.15, 0.15),
+          new THREE.MeshBasicMaterial({ color: 0xff3344, wireframe: true }),
+        );
+        marker.position.set(0, CAMERA_HEIGHT, -1);
+        scene.add(marker);
+      }
     },
     onUpdate: () => animateCube(performance.now()),
   };
