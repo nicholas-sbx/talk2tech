@@ -3,7 +3,8 @@
 // and gives us the frames we send to Gemini. When Gemini says where the object is in one of those
 // frames, a scribbled face (scribble.js) is stuck flat onto its surface in the tracked 3D world. It
 // talks while the reply plays, panics and screams as the object nears the edge of the screen, and
-// dies if it's lost off it, until Gemini next places it.
+// dies if it's lost off it, until Gemini next places it. While a reply is being worked out, it's a
+// thought bubble instead.
 //
 // 8th Wall engine © Niantic Spatial, Inc., used under the XR Engine License Agreement:
 // https://github.com/8thwall/engine/blob/main/LICENSE
@@ -304,7 +305,36 @@ export function clearMarker() {
   placement = null;
   targetPosition = null;
   if (smiley) smiley.visible = false;
+  face.setThinking(false, performance.now(), true);
   revive();
+}
+
+// While the object works out a reply, its face turns into a thought bubble, and back when it
+// answers. Lost in thought, it doesn't notice the edges of the screen: it can't scream or die, so
+// it's still thinking when you find it again.
+export function setThinking(on) {
+  face.setThinking(on, performance.now());
+  if (!on) return;
+  face.panic = 0;
+  audio?.updatePanic(0);
+  setScreaming(false);
+}
+
+// Where the face is on screen, in CSS pixels, and its radius there; null if there's no face or
+// it's behind the camera.
+export function faceOnScreen() {
+  if (!running || !targetPosition) return null;
+  const { camera } = XR8.Threejs.xrScene();
+  camera.updateMatrixWorld();
+  const centre = smiley.visible ? smiley.position : targetPosition;
+  if (centre.clone().applyMatrix4(camera.matrixWorldInverse).z >= 0) return null;
+  const side = new THREE.Vector3(1, 0, 0).transformDirection(camera.matrixWorld);
+  const edge = centre.clone().addScaledVector(side, (smiley.visible ? size : placement.size) / 2);
+  const [c, e] = [centre.clone(), edge].map((v) => {
+    v.project(camera);
+    return { x: ((v.x + 1) / 2) * innerWidth, y: ((1 - v.y) / 2) * innerHeight };
+  });
+  return { x: c.x, y: c.y, r: Math.hypot(e.x - c.x, e.y - c.y) };
 }
 
 // Calls back when the face dies, so whatever it was saying can be cut off.
@@ -666,6 +696,7 @@ function animateMarker(time, camera) {
     smiley.quaternion.copy(targetQuaternion);
     size = placement.size;
     smiley.visible = true;
+    face.appear(time);
   } else {
     smiley.position.lerp(targetPosition, FOLLOW);
     smiley.quaternion.slerp(targetQuaternion, FOLLOW);
@@ -729,7 +760,7 @@ function gazeAtCamera(camera) {
 // Where the face is on screen: calm, it looks at you; near an edge it panics, looks at that edge
 // and screams; past it (or behind the camera) it dies.
 function feelTheEdges(camera, time) {
-  if (face.isDead) return;
+  if (face.isDead || face.thinking) return;
   camera.updateMatrixWorld();
   const behind = smiley.position.clone().applyMatrix4(camera.matrixWorldInverse).z >= 0;
   const at = smiley.position.clone().project(camera);
