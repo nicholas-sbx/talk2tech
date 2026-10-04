@@ -1,96 +1,123 @@
-// WebXR AR (Android Chrome + ARCore): owns the camera, grabs frames for Gemini, and pins a
-// pulsating green cube on the object Gemini located in one of those frames.
-// Three.js is only downloaded once an AR session actually starts.
+// AR on phones via the 8th Wall engine (world tracking in plain iOS Safari and Android Chrome),
+// rendered with three.js. 8th Wall owns the camera: it draws the feed, tracks the phone's pose,
+// and gives us the frames we send to Gemini. When Gemini says where the object is in one of those
+// frames, a pulsating green cube is placed on it in the tracked 3D world.
+//
+// 8th Wall engine © Niantic Spatial, Inc., used under the XR Engine License Agreement:
+// https://github.com/8thwall/engine/blob/main/LICENSE
 
+const ENGINE_URL = "https://cdn.jsdelivr.net/npm/@8thwall/engine-binary@1.0.0/dist/xr.js";
 const MAX_FRAME_SIDE = 768;
 const SNAPSHOTS_KEPT = 10;
-const CAPTURE_TIMEOUT_MS = 500;
-const HIT_TEST_FRAMES = 10; // how long to wait for a hit before falling back to a fixed distance
-const FALLBACK_DISTANCE_M = 0.6;
-const CUBE_MIN_M = 0.05;
-const CUBE_MAX_M = 0.4;
+const CAPTURE_TIMEOUT_MS = 1000;
+const SURFACE_GRID = 5; // surface hit tests per side, a fallback when no tracked points hit the object
+const BOX_CORE = 0.6; // only trust tracked points in the middle of the box, not its edges
+// Scene units are about metres: tracking assumes the phone starts this high above the floor.
+const CAMERA_HEIGHT = 1.4;
+const FALLBACK_DEPTH = 0.6;
+const CUBE_MIN = 0.03;
+const CUBE_MAX = 0.6;
 const PULSE_HZ = 1.5;
-const FOLLOW = 0.15; // per-frame easing toward a new placement, so re-anchoring doesn't jump
+const FOLLOW = 0.15; // per-frame easing toward a new placement, so re-locating doesn't jump
 
 let THREE = null;
-let session = null;
-let renderer, scene, camera, refSpace, gl, glBinding, readFramebuffer;
+let XR8 = null;
+let canvas = null;
+let running = false;
 let cube, cubeFill;
-let onEnd = null;
 
-// Pose of the camera for each frame we sent, so a box that arrives seconds later still maps onto
-// the world the way it was when the photo was taken.
+// Camera pose, projection and 3D points for each frame we sent, so a box that arrives seconds
+// later still maps onto the world the way it was when the photo was taken.
 const snapshots = new Map();
 let frameCounter = 0;
 let captureWaiters = [];
+let reality = null; // this frame's tracking output
 
-let placementGen = 0; // bumped on every new placement or clear, so stale async work is dropped
-let pending = null; // hit test in progress: { source, frames, origin, dir, box, projection, gen }
-let anchor = null;
 let target = null; // where the cube should be (THREE.Vector3)
 let targetSize = 0.1;
 let size = 0.1;
 
-export async function arSupported() {
-  try {
-    return Boolean(await navigator.xr?.isSessionSupported("immersive-ar"));
-  } catch {
-    return false;
-  }
+// World tracking needs a phone's camera and motion sensors.
+export function arSupported() {
+  const ua = navigator.userAgent;
+  const iPad = /Macintosh/.test(ua) && navigator.maxTouchPoints > 1;
+  return window.isSecureContext && (/Android|iPhone|iPad|iPod/.test(ua) || iPad);
+}
+
+// The engine is ~6 MB, so start fetching it as soon as the page loads on a phone.
+const engine = arSupported() ? loadEngine() : null;
+engine?.catch((err) => console.warn(err));
+
+function loadEngine() {
+  return new Promise((resolve, reject) => {
+    if (window.XR8) return resolve(window.XR8);
+    window.addEventListener("xrloaded", () => resolve(window.XR8), { once: true });
+    const script = document.createElement("script");
+    script.src = ENGINE_URL;
+    script.async = true;
+    script.crossOrigin = "anonymous";
+    script.onerror = () => reject(new Error("Couldn't load the AR engine."));
+    document.head.append(script);
+  });
+}
+
+// iOS only grants motion sensors from inside a tap, so call this first thing in one.
+export function requestMotionPermission() {
+  const ask = (cls) => (cls?.requestPermission ? cls.requestPermission().catch(() => "denied") : "granted");
+  return Promise.all([ask(window.DeviceMotionEvent), ask(window.DeviceOrientationEvent)]);
 }
 
 export function inAR() {
-  return session !== null;
+  return running;
 }
 
-// Must be called from a user gesture. overlayRoot stays interactive on top of the camera view.
-export async function startAR(overlayRoot, { onEnd: endCallback } = {}) {
-  const xrSession = await navigator.xr.requestSession("immersive-ar", {
-    requiredFeatures: ["hit-test", "camera-access"],
-    optionalFeatures: ["anchors", "dom-overlay"],
-    domOverlay: { root: overlayRoot },
-  });
-  try {
-    THREE ??= await import("three");
-    renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true });
-    renderer.xr.enabled = true;
-    renderer.xr.setReferenceSpaceType("local");
-    await renderer.xr.setSession(xrSession);
-  } catch (err) {
-    xrSession.end().catch(() => {});
-    throw err;
+// Resolves once the camera feed is up and tracking has started.
+export async function startAR() {
+  if (!engine) throw new Error("AR needs a phone.");
+  XR8 = await engine;
+  await XR8.loadChunk("slam");
+  if (!XR8.XrDevice.isDeviceBrowserCompatible({ allowedDevices: XR8.XrConfig.device().MOBILE })) {
+    throw new Error("This browser can't do AR. Try Safari or Chrome.");
   }
-  session = xrSession;
-  onEnd = endCallback;
-  refSpace = renderer.xr.getReferenceSpace();
-  gl = renderer.getContext();
-  glBinding = new XRWebGLBinding(session, gl);
-  readFramebuffer = gl.createFramebuffer();
+  THREE ??= await import("three");
+  window.THREE = THREE; // 8th Wall's three.js module looks for it here
 
-  scene = new THREE.Scene();
-  camera = new THREE.PerspectiveCamera(); // replaced by the XR camera while presenting
-  scene.add(new THREE.HemisphereLight(0xffffff, 0x445544, 1.5));
-  scene.add(makeCube());
+  canvas = document.createElement("canvas");
+  canvas.id = "ar-canvas";
+  XR8.XrController.configure({ disableWorldTracking: false });
 
-  // Taps on the UI shouldn't also count as taps on the AR scene.
-  overlayRoot.addEventListener("beforexrselect", (e) => e.preventDefault());
-  session.addEventListener("end", handleEnd);
-  renderer.setAnimationLoop(onXRFrame);
-}
-
-function handleEnd() {
-  renderer.setAnimationLoop(null);
-  clearCube();
-  captureWaiters.forEach((resolve) => resolve(null));
-  captureWaiters = [];
-  snapshots.clear();
-  session = null;
-  onEnd?.();
+  await new Promise((resolve, reject) => {
+    XR8.addCameraPipelineModules([
+      XR8.FullWindowCanvas.pipelineModule(),
+      XR8.XrController.pipelineModule(),
+      XR8.GlTextureRenderer.pipelineModule(), // draws the camera feed
+      captureModule(), // runs after the feed is drawn but before the cube is, so frames are clean
+      XR8.Threejs.pipelineModule(),
+      sceneModule(),
+      {
+        name: "talk2tech-start",
+        onStart: () => {
+          running = true;
+          resolve();
+        },
+        onCameraStatusChange: ({ status }) => {
+          if (status === "failed") reject(new Error("Camera access was blocked."));
+        },
+        onException: (err) => (running ? console.warn("[AR]", err) : reject(err)),
+      },
+    ]);
+    XR8.run({ canvas, webgl2: true }); // current three.js is WebGL 2 only
+  }).catch((err) => {
+    XR8.stop();
+    XR8.clearCameraPipelineModules();
+    canvas.remove();
+    throw err;
+  });
 }
 
 // Resolves to { image (b64 JPEG), frameId } from the next AR frame, or null.
 export function captureFrame() {
-  if (!session) return Promise.resolve(null);
+  if (!running) return Promise.resolve(null);
   return new Promise((resolve) => {
     captureWaiters.push(resolve);
     setTimeout(() => {
@@ -102,156 +129,132 @@ export function captureFrame() {
 }
 
 // box: Gemini box_2d [ymin, xmin, ymax, xmax] (0-1000) for the frame captureFrame() named frameId.
-export async function placeBox(box, frameId) {
+export function placeBox(box, frameId) {
   const snap = snapshots.get(frameId);
-  if (!session || !snap || !box) return;
-  const gen = ++placementGen;
-  cancelPending();
-
-  // Ray from the camera, as it was when the frame was taken, through the centre of the box.
+  if (!running || !snap || !box) return;
   const [ymin, xmin, ymax, xmax] = box;
-  const ndc = new THREE.Vector4((xmin + xmax) / 1000 - 1, 1 - (ymin + ymax) / 1000, -1, 1);
-  const projection = new THREE.Matrix4().fromArray(snap.projection);
-  const cameraToWorld = new THREE.Matrix4().fromArray(snap.transform);
-  ndc.applyMatrix4(projection.clone().invert());
-  const dir = new THREE.Vector3(ndc.x, ndc.y, ndc.z).divideScalar(ndc.w).transformDirection(cameraToWorld);
-  const origin = new THREE.Vector3().setFromMatrixPosition(cameraToWorld);
 
-  const offsetRay = new XRRay({ ...origin, w: 1 }, { ...dir, w: 0 });
-  let source = null;
-  try {
-    source = await session.requestHitTestSource({ space: refSpace, offsetRay, entityTypes: ["point", "plane"] });
-  } catch {
-    try {
-      source = await session.requestHitTestSource({ space: refSpace, offsetRay });
-    } catch (err) {
-      console.warn("hit test unavailable", err);
-    }
-  }
-  if (gen !== placementGen || !session) return source?.cancel();
-  pending = { source, frames: 0, origin, dir, box, projection, gen };
+  // How far away the object is: tracked points that land inside the box, as seen from the camera
+  // when the frame was taken; failing that, the estimated surfaces under the box.
+  const cy = (ymin + ymax) / 2;
+  const cx = (xmin + xmax) / 2;
+  const halfH = ((ymax - ymin) / 2) * BOX_CORE;
+  const halfW = ((xmax - xmin) / 2) * BOX_CORE;
+  const inBox = (p) => Math.abs(p.y - cy) <= halfH && Math.abs(p.x - cx) <= halfW;
+  const depthIn = (points) => median(points.map((p) => project(p, snap)).filter((p) => p && inBox(p)).map((p) => p.depth));
+  const depth = depthIn(snap.points) ?? depthIn(snap.surfaces) ?? FALLBACK_DEPTH;
+
+  // Ray from the camera through the centre of the box, out to that depth.
+  const ndc = new THREE.Vector3(cx / 500 - 1, 1 - cy / 500, -1).applyMatrix4(snap.projectionInverse);
+  const dirCamera = ndc.normalize();
+  const along = depth / -dirCamera.z;
+  const origin = new THREE.Vector3().setFromMatrixPosition(snap.cameraToWorld);
+  const dir = dirCamera.clone().transformDirection(snap.cameraToWorld);
+
+  // Real-world size of the box at that depth; the cube matches its smaller side.
+  const p = snap.projection.elements;
+  const width = ((xmax - xmin) / 500) * (depth / p[0]);
+  const height = ((ymax - ymin) / 500) * (depth / p[5]);
+  targetSize = THREE.MathUtils.clamp(Math.min(width, height), CUBE_MIN, CUBE_MAX);
+
+  // The points are on the object's front surface: sit the cube's centre inside it.
+  target = origin.addScaledVector(dir, along + targetSize / 2);
 }
 
 export function clearCube() {
-  placementGen++;
-  cancelPending();
-  anchor?.delete();
-  anchor = null;
   target = null;
   if (cube) cube.visible = false;
 }
 
-function cancelPending() {
-  pending?.source?.cancel();
-  pending = null;
+// A world point as seen from a snapshot's camera: box coordinates (0-1000) and depth, or null if
+// it's behind the camera.
+function project(point, snap) {
+  const v = point.clone().applyMatrix4(snap.worldToCamera);
+  if (v.z >= 0) return null;
+  const depth = -v.z;
+  v.applyMatrix4(snap.projection);
+  return { x: (v.x + 1) * 500, y: (1 - v.y) * 500, depth };
 }
 
-// ---------- per frame ----------
-
-function onXRFrame(time, frame) {
-  if (frame) {
-    const pose = frame.getViewerPose(refSpace);
-    if (pose && captureWaiters.length) serveCaptures(pose.views[0]);
-    if (pending) resolvePlacement(frame);
-    followAnchor(frame);
-  }
-  animateCube(time);
-  renderer.render(scene, camera);
+function median(values) {
+  if (!values.length) return null;
+  values.sort((a, b) => a - b);
+  return values[Math.floor(values.length / 2)];
 }
 
-function serveCaptures(view) {
-  const waiters = captureWaiters;
-  captureWaiters = [];
-  let result = null;
-  try {
-    result = capture(view);
-  } catch (err) {
-    console.warn("camera capture failed", err);
-  }
-  waiters.forEach((resolve) => resolve(result));
+// ---------- pipeline modules ----------
+
+function captureModule() {
+  return {
+    name: "talk2tech-capture",
+    onUpdate: ({ processCpuResult }) => {
+      reality = processCpuResult.reality || null;
+    },
+    onRender: () => {
+      if (!captureWaiters.length || !reality?.intrinsics) return;
+      const image = readCanvas();
+      if (!image) return; // iOS sometimes can't read the canvas this frame; try the next one
+      const frameId = `ar${++frameCounter}`;
+      snapshots.set(frameId, snapshot(reality));
+      while (snapshots.size > SNAPSHOTS_KEPT) snapshots.delete(snapshots.keys().next().value);
+      const waiters = captureWaiters;
+      captureWaiters = [];
+      waiters.forEach((resolve) => resolve({ image, frameId }));
+    },
+  };
 }
 
-function capture(view) {
-  if (!view.camera) return null;
-  const image = readCameraImage(view.camera);
-  const frameId = `ar${++frameCounter}`;
-  snapshots.set(frameId, {
-    transform: Array.from(view.transform.matrix),
-    projection: Array.from(view.projectionMatrix),
-  });
-  while (snapshots.size > SNAPSHOTS_KEPT) snapshots.delete(snapshots.keys().next().value);
-  return { image, frameId };
-}
-
-// The camera image is a GPU texture only valid during this frame: read it back and JPEG it.
-function readCameraImage(xrCamera) {
-  const { width, height } = xrCamera;
-  const texture = glBinding.getCameraImage(xrCamera);
-  gl.bindFramebuffer(gl.FRAMEBUFFER, readFramebuffer);
-  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture, 0);
-  const pixels = new Uint8Array(width * height * 4);
-  gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
-  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-  renderer.resetState(); // we touched GL behind three's back
-
-  // readPixels is bottom-up; images are top-down.
-  const full = document.createElement("canvas");
-  full.width = width;
-  full.height = height;
-  const ctx = full.getContext("2d");
-  const imageData = ctx.createImageData(width, height);
-  const row = width * 4;
-  for (let y = 0; y < height; y++) {
-    imageData.data.set(pixels.subarray((height - 1 - y) * row, (height - y) * row), y * row);
-  }
-  ctx.putImageData(imageData, 0, 0);
-
-  const scale = Math.min(1, MAX_FRAME_SIDE / Math.max(width, height));
+// The camera feed as drawn this frame, as a JPEG. Same crop as the screen, which is also the space
+// the tracking's projection and hit tests use.
+function readCanvas() {
+  const scale = Math.min(1, MAX_FRAME_SIDE / Math.max(canvas.width, canvas.height));
   const out = document.createElement("canvas");
-  out.width = Math.round(width * scale);
-  out.height = Math.round(height * scale);
-  out.getContext("2d").drawImage(full, 0, 0, out.width, out.height);
+  out.width = Math.round(canvas.width * scale);
+  out.height = Math.round(canvas.height * scale);
+  const ctx = out.getContext("2d");
+  ctx.drawImage(canvas, 0, 0, out.width, out.height);
+  if (ctx.getImageData(0, 0, 1, 1).data[3] === 0) return null;
   return out.toDataURL("image/jpeg", 0.7).split(",")[1];
 }
 
-function resolvePlacement(frame) {
-  const results = pending.source ? frame.getHitTestResults(pending.source) : [];
-  if (!results.length && ++pending.frames < HIT_TEST_FRAMES) return;
-  const { origin, dir, box, projection, gen } = pending;
-  cancelPending();
-
-  const hitPose = results[0]?.getPose(refSpace);
-  const hit = hitPose
-    ? new THREE.Vector3().copy(hitPose.transform.position)
-    : origin.clone().addScaledVector(dir, FALLBACK_DISTANCE_M);
-  const distance = hit.distanceTo(origin);
-
-  // Real-world size of the box at that distance; the cube matches its smaller side.
-  const [ymin, xmin, ymax, xmax] = box;
-  const width = ((xmax - xmin) / 500) * (distance / projection.elements[0]);
-  const height = ((ymax - ymin) / 500) * (distance / projection.elements[5]);
-  targetSize = THREE.MathUtils.clamp(Math.min(width, height), CUBE_MIN_M, CUBE_MAX_M);
-
-  // The hit is on the object's front surface (or what's behind it): sit the cube's centre inside it.
-  const position = hit.addScaledVector(dir, targetSize / 2);
-  target = position.clone();
-
-  // An anchor keeps the spot fixed as ARCore refines its map of the room.
-  if (!frame.createAnchor) return; // "anchors" wasn't granted: the cube just stays at this position
-  frame
-    .createAnchor(new XRRigidTransform({ x: position.x, y: position.y, z: position.z }), refSpace)
-    .then((created) => {
-      if (gen !== placementGen) return created.delete();
-      anchor?.delete();
-      anchor = created;
-    })
-    .catch((err) => console.warn("anchor failed", err));
+function snapshot({ position, rotation, intrinsics, worldPoints = [] }) {
+  const cameraToWorld = new THREE.Matrix4().compose(
+    new THREE.Vector3(position.x, position.y, position.z),
+    new THREE.Quaternion(rotation.x, rotation.y, rotation.z, rotation.w),
+    new THREE.Vector3(1, 1, 1),
+  );
+  const projection = new THREE.Matrix4().fromArray(intrinsics);
+  const surfaces = [];
+  for (let gy = 0; gy < SURFACE_GRID; gy++) {
+    for (let gx = 0; gx < SURFACE_GRID; gx++) {
+      const x = (gx + 0.5) / SURFACE_GRID;
+      const y = (gy + 0.5) / SURFACE_GRID;
+      const hit = XR8.XrController.hitTest(x, y, ["ESTIMATED_SURFACE", "DETECTED_SURFACE"])[0];
+      if (hit) surfaces.push(new THREE.Vector3(hit.position.x, hit.position.y, hit.position.z));
+    }
+  }
+  return {
+    cameraToWorld,
+    worldToCamera: cameraToWorld.clone().invert(),
+    projection,
+    projectionInverse: projection.clone().invert(),
+    points: worldPoints.map(({ position: p }) => new THREE.Vector3(p.x, p.y, p.z)),
+    surfaces,
+  };
 }
 
-function followAnchor(frame) {
-  if (!anchor || !target || !frame.trackedAnchors?.has(anchor)) return;
-  const pose = frame.getPose(anchor.anchorSpace, refSpace);
-  if (pose) target.copy(pose.transform.position);
+function sceneModule() {
+  return {
+    name: "talk2tech-scene",
+    onStart: () => {
+      const { scene, camera } = XR8.Threejs.xrScene();
+      scene.add(new THREE.HemisphereLight(0xffffff, 0x445544, 1.5));
+      scene.add(makeCube());
+      camera.position.set(0, CAMERA_HEIGHT, 0);
+      XR8.XrController.updateCameraProjectionMatrix({ origin: camera.position, facing: camera.quaternion });
+    },
+    onUpdate: () => animateCube(performance.now()),
+  };
 }
 
 // ---------- the cube ----------

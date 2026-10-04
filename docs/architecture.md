@@ -28,6 +28,15 @@
 Vision LLMs take still images. The device grabs one frame when the talk button is pressed, downscales
 it, and attaches it to that turn. It feels live and costs far less than streaming video.
 
+## AR marker
+
+On phones the 8th Wall engine owns the camera (`device/ar.js`): it draws the feed, tracks the phone in
+3D, and three.js renders over it. Frames for Gemini are read from that canvas, and for each one the
+device keeps the camera pose and the 3D feature points it can see, keyed by `frame_id`. Gemini returns
+the object's `box_2d` with the persona and again (via a parallel `locate` call) on every later turn.
+The device takes the median depth of the tracked points inside the box, as seen from the saved pose,
+and places a pulsing cube there. Desktop browsers keep the plain camera view.
+
 ## Mock mode
 
 Every integration has a mock with the same interface (`make_llm`, `make_voice`, `make_memory`).
