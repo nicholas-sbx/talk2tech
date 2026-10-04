@@ -23,6 +23,10 @@ const SLAB = 0.25; // thickness, as a fraction of the side: a flattish cube lyin
 const PULSE_HZ = 1.5;
 const FOLLOW = 0.15; // per-frame easing toward a new placement, so re-locating doesn't jump
 const MIN_PLANE_HITS = 4; // fewer hits than this can't give a trustworthy surface angle
+const MAX_PLANE_ROUGHNESS = 0.2; // reject fits whose points stray from the plane by more than this share of their spread
+// The slab never tilts further than this from facing the camera, so a noisy fit can't turn it
+// edge-on (and invisible).
+const MAX_TILT = (60 * Math.PI) / 180;
 // A new box this close to the current placement (in slab sides) refines it instead of replacing it.
 const SAME_SPOT = 2;
 const RELOCATE_BLEND = 0.5;
@@ -30,6 +34,11 @@ const RELOCATE_BLEND = 0.5;
 const REFINE_EVERY = 6; // frames
 const REFINE_GRID = 4; // hit tests per side, spread over the slab's footprint on screen
 const DEPTH_GAIN = 0.3;
+// Re-checks only trust hits within this share of the slab's distance, and can never move it further
+// than this share of its placed depth from where Gemini's box put it, so stray points can't walk it
+// off (or into the camera).
+const REFINE_WINDOW = 0.3;
+const REFINE_LEASH = 0.3;
 const NORMAL_GAIN = 0.15;
 const DEBUG = new URLSearchParams(location.search).has("debug");
 const CAMERA_FAILURES = {
@@ -207,7 +216,7 @@ export function placeBox(box, frameId) {
     source = used.length ? `${used.length} feature hits, facing camera` : "no hits in box, fixed depth";
   }
   const point = origin.clone().addScaledVector(dir, depth / -dirCamera.z);
-  if (normal.dot(origin.clone().sub(point)) < 0) normal.negate();
+  limitTilt(normal, origin.clone().sub(point));
 
   // Real-world size of the box at that depth; the slab matches its smaller side.
   const p = snap.projection.elements;
@@ -219,11 +228,14 @@ export function placeBox(box, frameId) {
   // Same object again (a later turn): nudge the slab rather than jumping to a noisier estimate.
   if (placement && placement.point.distanceTo(point) < SAME_SPOT * Math.max(side, placement.size)) {
     placement.point.lerp(point, RELOCATE_BLEND);
-    placement.normal.lerp(normal, RELOCATE_BLEND).normalize();
+    placement.home.lerp(point, RELOCATE_BLEND);
+    placement.leash += (depth * REFINE_LEASH - placement.leash) * RELOCATE_BLEND;
+    limitTilt(placement.normal.lerp(normal, RELOCATE_BLEND).normalize(), origin.clone().sub(placement.point));
     placement.size += (side - placement.size) * RELOCATE_BLEND;
     source += ", blended";
   } else {
-    placement = { point, normal, right, size: side };
+    // home and leash: where the box put it, and how far re-checks may move it from there.
+    placement = { point, normal, right, size: side, home: point.clone(), leash: depth * REFINE_LEASH };
   }
   aimSlab();
 
@@ -271,8 +283,7 @@ function refineOnSurface(camera) {
   const sx = (centre.x + 1) / 2;
   const sy = (1 - centre.y) / 2;
 
-  // Keep hits near the line of sight to the slab, within a broad range of depths (so a bad first
-  // guess can still converge).
+  // Keep hits near the line of sight to the slab and near its current depth.
   const reach = placement.size + 0.02;
   const hits = [];
   for (let gy = 0; gy < REFINE_GRID; gy++) {
@@ -283,26 +294,41 @@ function refineOnSurface(camera) {
         const at = new THREE.Vector3(hit.position.x, hit.position.y, hit.position.z);
         const along = at.clone().sub(eye).dot(sight);
         const off = at.clone().sub(eye).addScaledVector(sight, -along).length();
-        if (off < reach && along > distance * 0.3 && along < distance * 3) hits.push({ at, along });
+        if (off < reach && Math.abs(along - distance) < distance * REFINE_WINDOW) hits.push({ at, along });
       }
     }
   }
   if (!hits.length) return;
 
   const along = median(hits.map((h) => h.along));
-  placement.point = eye.clone().addScaledVector(sight, distance + (along - distance) * DEPTH_GAIN);
+  const moved = eye.clone().addScaledVector(sight, distance + (along - distance) * DEPTH_GAIN);
+  const offset = moved.clone().sub(placement.home);
+  if (offset.length() > placement.leash) moved.copy(placement.home).addScaledVector(offset.normalize(), placement.leash);
+  placement.point = moved;
   const plane = fitPlane(hits.map((h) => h.at));
   if (plane) {
-    if (plane.normal.dot(sight) > 0) plane.normal.negate();
-    placement.normal.lerp(plane.normal, NORMAL_GAIN).normalize();
+    const towardEye = sight.clone().negate();
+    limitTilt(plane.normal, towardEye);
+    limitTilt(placement.normal.lerp(plane.normal, NORMAL_GAIN).normalize(), towardEye);
   }
   stats.refines++;
   stats.lastRefine = `${hits.length} hits${plane ? ", plane" : ""}`;
   aimSlab();
 }
 
+// Points `normal` (in place) toward `toward`'s side, tilted at most MAX_TILT away from it.
+function limitTilt(normal, toward) {
+  const facing = toward.clone().normalize();
+  if (normal.dot(facing) < 0) normal.negate();
+  const angle = normal.angleTo(facing);
+  if (angle <= MAX_TILT) return normal;
+  const axis = facing.clone().cross(normal);
+  if (axis.lengthSq() < 1e-9) return normal.copy(facing);
+  return normal.copy(facing.applyAxisAngle(axis.normalize(), MAX_TILT));
+}
+
 // Least-squares plane through some points: their centroid and the unit normal, or null if there
-// are too few or they're all in a line.
+// are too few, they're all in a line, or they're too scattered to be one surface.
 function fitPlane(points) {
   if (points.length < MIN_PLANE_HITS) return null;
   const c = points.reduce((sum, v) => sum.add(v), new THREE.Vector3()).divideScalar(points.length);
@@ -322,7 +348,18 @@ function fitPlane(points) {
     best === detX ? new THREE.Vector3(detX, xz * yz - xy * zz, xy * yz - xz * yy)
     : best === detY ? new THREE.Vector3(xz * yz - xy * zz, detY, xy * xz - yz * xx)
     : new THREE.Vector3(xy * yz - xz * yy, xy * xz - yz * xx, detZ);
-  return { centroid: c, normal: normal.normalize() };
+  normal.normalize();
+  // How far the points stray from the plane, against how spread out they are along it.
+  let off = 0;
+  let spread = 0;
+  for (const v of points) {
+    const r = v.clone().sub(c);
+    const d = r.dot(normal);
+    off += d * d;
+    spread += r.lengthSq() - d * d;
+  }
+  if (Math.sqrt(off) > MAX_PLANE_ROUGHNESS * Math.sqrt(spread)) return null;
+  return { centroid: c, normal };
 }
 
 // A world point as seen from a snapshot's camera: box coordinates (0-1000) and depth, or null if
@@ -482,16 +519,6 @@ function sceneModule() {
       scene.add(makeCube());
       camera.position.set(0, CAMERA_HEIGHT, 0);
       XR8.XrController.updateCameraProjectionMatrix({ origin: camera.position, facing: camera.quaternion });
-      // ?debug: a fixed red cube 1 m ahead of where you started, to check rendering and tracking
-      // separately from placing the real one.
-      if (DEBUG) {
-        const marker = new THREE.Mesh(
-          new THREE.BoxGeometry(0.15, 0.15, 0.15),
-          new THREE.MeshBasicMaterial({ color: 0xff3344, wireframe: true }),
-        );
-        marker.position.set(0, CAMERA_HEIGHT, -1);
-        scene.add(marker);
-      }
     },
     onUpdate: () => {
       if (++updates % REFINE_EVERY === 0) refineOnSurface(XR8.Threejs.xrScene().camera);
@@ -512,6 +539,7 @@ function makeCube() {
     transparent: true,
     opacity: 0.35,
     depthWrite: false,
+    side: THREE.DoubleSide, // still visible if the camera ends up inside it
   });
   const edges = new THREE.LineSegments(
     new THREE.EdgesGeometry(geometry),
