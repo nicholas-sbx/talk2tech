@@ -282,16 +282,32 @@ def _normalize_focus(raw, current: str) -> dict:
 
 
 def _normalize_box(raw) -> list[int] | None:
-    """A valid [ymin, xmin, ymax, xmax] box in 0-1000, or None."""
-    if not isinstance(raw, list) or len(raw) != 4:
+    """A valid [ymin, xmin, ymax, xmax] box in 0-1000, or None.
+
+    Gemini sometimes wraps the box in another list, puts a stray value next to it, or splits the
+    object into several boxes (a laptop's screen and its base), so this takes the box around every
+    valid one it finds.
+    """
+    boxes = _find_boxes(raw)
+    if not boxes:
+        if raw is not None:
+            log.warning("unusable box_2d from Gemini: %r", raw)
         return None
-    try:
-        ymin, xmin, ymax, xmax = (max(0, min(1000, round(float(v)))) for v in raw)
-    except (TypeError, ValueError):
-        return None
-    if ymax <= ymin or xmax <= xmin:
-        return None
-    return [ymin, xmin, ymax, xmax]
+    ymins, xmins, ymaxs, xmaxs = zip(*boxes)
+    return [min(ymins), min(xmins), max(ymaxs), max(xmaxs)]
+
+
+def _find_boxes(raw) -> list[list[int]]:
+    """Every valid [ymin, xmin, ymax, xmax] list in raw, however deeply it's nested."""
+    if not isinstance(raw, list):
+        return []
+    if len(raw) == 4 and not any(isinstance(v, (list, dict)) for v in raw):
+        try:
+            ymin, xmin, ymax, xmax = (max(0, min(1000, round(float(v)))) for v in raw)
+        except (TypeError, ValueError):
+            return []
+        return [[ymin, xmin, ymax, xmax]] if ymax > ymin and xmax > xmin else []
+    return [box for item in raw for box in _find_boxes(item)]
 
 
 def make_llm():
