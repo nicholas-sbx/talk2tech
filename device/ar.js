@@ -324,10 +324,11 @@ function setScreaming(on) {
 
 // Moves the face's mouth while a reply plays. Given the analyser the reply plays through, the mouth
 // opens as wide as it's loud; without one (e.g. the browser's own speech) it just flaps.
-export function setSpeaking(on, analyser = null) {
-  markers.forEach(({ face }) => {
-    face.speaking = Boolean(on);
-    face.mouthLevel = on && analyser ? 0 : null;
+export function setSpeaking(on, analyser = null, speakerId = 0) {
+  markers.forEach(({ face }, index) => {
+    face.speaking = Boolean(on && index === speakerId);
+    if (!on) face.mouthLevel = null;
+    else if (index === speakerId && analyser) face.mouthLevel = 0;
   });
   voice = on ? analyser : null;
 }
@@ -698,6 +699,7 @@ function animateMarker(time, camera) {
 
 // The face, with its silhouette stamped in a ring behind it as an outline.
 function drawFace(marker, time) {
+  if (!marker.face.speaking && marker.face.panic <= 0 && !marker.face.isDead) return;
   const ink = marker.inkCanvas.getContext("2d");
   ink.clearRect(0, 0, FACE_PIXELS, FACE_PIXELS);
   marker.face.draw(ink, FACE_PIXELS / 2, FACE_PIXELS / 2, FACE_PIXELS / (FACE_UNITS * FACE_PLANE), time);

@@ -65,8 +65,7 @@ let playChain = Promise.resolve();
 let playGen = 0; // bumped on interrupt so queued audio is dropped
 let pendingSpeech = 0;
 let current = null; // the sentence playing now: { pause, resume, stop }
-let screaming = false; // the AR face is screaming: speech waits until it stops
-let calmWaiters = [];
+let screaming = false; // an AR face is screaming, so the microphone stays closed
 const speakerNames = ["Face 1", "Face 2"];
 const thingLines = [null, null];
 
@@ -220,7 +219,7 @@ function handle(msg) {
           thingLines[speakerId].textContent = `${prefix}${(previous + " " + msg.text).trim()}`;
         });
       }
-      enqueueSpeech(msg.text, msg.audio);
+      enqueueSpeech(msg.text, msg.audio, msg.speaker_id ?? 0);
       break;
     case "done":
       thingLines.fill(null);
@@ -522,27 +521,16 @@ onDeath(() => {
   send({ type: "interrupt" });
 });
 
-// While the AR face screams, the sentence it's on pauses, then picks up where it left off. The mic
-// closes for the scream too (unless you're talking), or iOS plays it as quietly as a phone call.
+// Fear is independent from dialogue. The face can scream while idle or while either persona is
+// speaking; only the microphone is closed so the phone does not feed the scream back to the server.
 onScream((on) => {
   screaming = on;
   if (on) {
-    current?.pause();
-    setSpeaking(false);
     releaseMic();
   } else {
-    if (current) {
-      current.resume();
-      setSpeaking(true, current.voice);
-    }
-    calmWaiters.splice(0).forEach((resolve) => resolve());
     scheduleMicReopen();
   }
 });
-
-function untilCalm() {
-  return screaming ? new Promise((resolve) => calmWaiters.push(resolve)) : Promise.resolve();
-}
 
 $("#reset").addEventListener("click", () => {
   stopSpeech();
@@ -560,7 +548,7 @@ function outLoud() {
   return speaking() || screaming;
 }
 
-function enqueueSpeech(text, audioB64) {
+function enqueueSpeech(text, audioB64, speakerId = 0) {
   const gen = playGen;
   pendingSpeech++;
   releaseMic();
@@ -572,9 +560,7 @@ function enqueueSpeech(text, audioB64) {
     if (gen !== playGen) return;
     const buffer = await decoded;
     if (gen !== playGen) return;
-    await untilCalm();
-    if (gen !== playGen) return;
-    setSpeaking(true, buffer ? voice : null);
+    setSpeaking(true, buffer ? voice : null, speakerId);
     await (buffer ? playBuffer(buffer) : speakLocally(text));
   }).finally(() => {
     if (gen !== playGen) return;
@@ -661,7 +647,6 @@ function stopSpeech() {
   scheduleMicReopen();
   current?.stop();
   window.speechSynthesis?.cancel();
-  calmWaiters.splice(0).forEach((resolve) => resolve()); // they see the new playGen and drop out
 }
 
 function base64ToBuffer(b64) {

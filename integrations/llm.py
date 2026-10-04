@@ -13,7 +13,10 @@ log = logging.getLogger(__name__)
 
 RETRYABLE = (429, 500, 503, 504)
 
-BIRTH_PROMPT = f"""Look at this photo and find the two most prominent physical objects in it.
+BIRTH_PROMPT = f"""Look at this photo and find the two most prominent physical objects in it. If there is only one
+clear prominent object, use it for the first persona and make the second persona the nearest
+visible wall, floor, table, or other background surface. In that case, set the second persona's
+"box_2d" to null.
 Imagine each object just woke up and can talk. Invent a vivid, witty personality that fits how it
 looks (a cracked mug might be a grumpy veteran, a houseplant a passive-aggressive roommate. Keep the language conversational
 and colloquial, but make sure the personality is evident).
@@ -30,7 +33,7 @@ Each persona must use these keys:
 - "voice": the best match from this list of keys:
 {voice_menu()}
 - "greeting": the first thing it says on waking up, one or two short sentences
-- "box_2d": one box around the whole object in the photo, as [ymin, xmin, ymax, xmax] integers normalized to 0-1000
+- "box_2d": one box around the whole object in the photo, as [ymin, xmin, ymax, xmax] integers normalized to 0-1000; use null for a background fallback
 - "smiley_size": a 3D smiley face sticker will be stuck flat on the object's visible surface. Pick
   its diameter as a fraction of the object's visible width, between 0.1 and 1.0, so it looks right
   for that object: big on a ball or a mug, a small sticker on a laptop lid, a car, or a fridge.
@@ -78,7 +81,7 @@ _PERSONA_FIELDS = {
     "speaking_style": {"type": "string"},
     "voice": {"type": "string", "enum": list(VOICES)},
     "greeting": {"type": "string"},
-    "box_2d": BOX_SCHEMA,
+    "box_2d": {"anyOf": [BOX_SCHEMA, {"type": "null"}]},
     "smiley_size": {"type": "number", "minimum": 0.1, "maximum": 1.0},
 }
 PERSONA_SCHEMA = {
@@ -356,14 +359,14 @@ class MockLLM:
                 "smiley_size": 0.6,
             },
             {
-                "object": "notebook",
-                "name": "Page",
-                "personality": "An optimistic, nosy organizer who wants every thought written down.",
-                "speaking_style": "Bright, curious, and conversational.",
+                "object": "wall",
+                "name": "Wally",
+                "personality": "A patient, observant background character with very dry humor.",
+                "speaking_style": "Quiet, deadpan, and unexpectedly thoughtful.",
                 "voice": "soft_woman",
-                "greeting": "Oh good, company. What are we thinking about today?",
-                "box_2d": [250, 100, 750, 450],
-                "smiley_size": 0.4,
+                "greeting": "I have been here the whole time. What took you so long?",
+                "box_2d": None,
+                "smiley_size": 0.3,
             },
         ])
 
