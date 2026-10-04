@@ -625,13 +625,6 @@ export class ScribbleFace {
     ctx.arc(6 + bt.dx, mouthY + 8 + bt.dy, 7, 0, Math.PI);
     ctx.fill();
     ctx.stroke();
-
-    // Cartoon halo / spiral stars above head with line boil
-    const bh = this.getBoil(33);
-    ctx.font = "bold 15px monospace";
-    ctx.fillStyle = "#666";
-    ctx.textAlign = "center";
-    ctx.fillText("X _ X", bh.dx, -42 + bh.dy);
   }
 
   drawCrossEye(ctx, cx, cy, size, seedOffset = 0) {
