@@ -204,8 +204,10 @@ class Session:
                 await self._birth(image, frame_id, lambda s: say(s, record=False), focus)
 
             await self.status("thinking")
+            model, words = await self.llm.reply_stream(self.persona, self.history, user_text, image)
+            await self.send({"type": "model", "model": model})
             buffer = ""
-            async for delta in self.llm.reply_stream(self.persona, self.history, user_text, image):
+            async for delta in words:
                 buffer += delta
                 sentences, buffer = pop_sentences(buffer)
                 for s in sentences:
