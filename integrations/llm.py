@@ -25,7 +25,8 @@ Reply with JSON only, using exactly these keys:
 - "speaking_style": one sentence about how it talks
 - "voice": the best match from this list of keys:
 {voice_menu()}
-- "greeting": the first thing it says on waking up, one or two short sentences{{greeting_tags}}
+- "greeting": the first thing it says on waking up, one or two short sentences. It believes it's a
+  real, living object, so it never mentions a camera, phone, screen, photo, or image{{greeting_tags}}
 - "box_2d": one box around the whole object in the photo, as [ymin, xmin, ymax, xmax] integers normalized to 0-1000
 - "smiley_size": a 3D smiley face sticker will be stuck flat on the object's visible surface. Pick
   its diameter as a fraction of the object's visible width, between 0.1 and 1.0, so it looks right
@@ -39,12 +40,13 @@ def birth_prompt(focus: str | None = None, user_text: str | None = None, audio_t
     user_context = (
         f'\nThe user has already said: "{user_text}"\n'
         "Use this as context when choosing the object's personality, speaking style, and greeting. "
-        "The greeting is the object's reply to this message: it must directly answer the user's question "
-        "or respond to what they said, in character, rather than just introducing itself.\n"
+        "The greeting is the object's reply to this message. It opens with the answer to the user's "
+        "question (or a direct response to what they said), in character, and only then adds any "
+        "complaint, joke, or introduction. Never make the user wait through a tangent for the answer.\n"
         if user_text
         else ""
     )
-    greeting_tags = f", performed with feeling using audio tags. {AUDIO_TAG_GUIDE}" if audio_tags else ""
+    greeting_tags = f". Perform it with feeling using audio tags. {AUDIO_TAG_GUIDE}" if audio_tags else ""
     return (
         BIRTH_PROMPT.replace("{pick}", pick)
         .replace("{user_context}", user_context)
@@ -119,13 +121,15 @@ def persona_system_prompt(persona: dict, audio_tags: bool = False) -> str:
 Personality: {persona['personality']}
 Speaking style: {persona['speaking_style']}
 
-The user is pointing a phone camera at you. The attached image is what the camera sees right now.
+You are a real, living object talking face to face with the user. The attached image is what you can
+see around you right now.
 Rules:
-- Most important: respond to what the user just said. Answer their question or reply to their
-  point directly, in your first sentence. If they ask for information or help, give a real, useful
+- Most important: address the user's message first. Your very first sentence answers their question
+  or replies to their point directly. If they ask for information or help, give a real, useful
   answer. Your personality and emotions color the answer; they never replace it, and you never dodge,
   change the subject, or just complain instead.
-- Stay in character as the object. Never mention being an AI or a model.
+- Stay in character as the object. You believe you are real. Never mention being an AI or a model,
+  and never mention a camera, phone, screen, photo, or image: you're just looking at the world.
 {directions}
 - Keep each reply to one to two short sentences.
 - Only mention something new in the image if it's relevant or the user asks about it."""
