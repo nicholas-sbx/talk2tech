@@ -109,8 +109,9 @@ AUDIO_TAG_GUIDE = (
     "Audio tags are short performance directions in square brackets that the voice acts out instead "
     "of saying, like [sighs], [laughs], [giggles], [whispers], [shouting], [groans], [gasps], "
     "[sarcastically], [excitedly], [nervously], [annoyed], [crying], or [muttering under breath]. "
-    "Put a tag right before the words it colors and use one in nearly every reply, picking the "
-    "emotion the moment calls for. Never put anything else in square brackets."
+    "Never start a reply with a tag: the first words are always the answer. Put a tag later in the "
+    "line, right before the words it colors, pick the emotion the moment calls for, and don't fall "
+    "back on [sighs]. Never put anything else in square brackets."
 )
 
 

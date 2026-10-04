@@ -13,7 +13,7 @@ import uuid
 
 from fastapi import WebSocket, WebSocketDisconnect
 
-from backend.sentences import clean_for_speech, pop_sentences
+from backend.sentences import clean_for_speech, pop_sentences, strip_leading_tags
 from integrations.voices import voice_id_for
 
 log = logging.getLogger(__name__)
@@ -218,6 +218,8 @@ class Session:
         def say(sentence: str, record: bool = True) -> None:
             # Audio tags like [laughs] go to the voice to act out, but not into the captions.
             spoken = clean_for_speech(sentence, keep_tags=tags)
+            if not pending_tts:
+                spoken = strip_leading_tags(spoken)  # the answer comes first, not a sigh
             if not spoken:
                 return
             if record:
