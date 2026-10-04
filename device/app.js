@@ -173,6 +173,8 @@ function handle(msg) {
     case "persona":
       $("#name").textContent = msg.persona.name;
       $("#object").textContent = msg.persona.object;
+      // A new persona is a new object: replace the marker rather than nudging the old one.
+      clearCube();
       if (msg.box) showBox(msg.box, msg.frame_id);
       break;
     case "box":

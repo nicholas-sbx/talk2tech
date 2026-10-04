@@ -13,7 +13,7 @@ log = logging.getLogger(__name__)
 
 RETRYABLE = (429, 500, 503, 504)
 
-BIRTH_PROMPT = f"""Look at this photo and pick the single most prominent physical object in it.
+BIRTH_PROMPT = f"""Look at this photo and {{pick}}.
 Imagine that object just woke up and can talk. Invent a vivid, funny personality that fits how it
 looks (a cracked mug might be a grumpy veteran, a houseplant a passive-aggressive roommate).
 
@@ -29,10 +29,24 @@ Reply with JSON only, using exactly these keys:
 """
 
 
-def locate_prompt(object_name: str) -> str:
-    return f"""Find the {object_name} in this photo.
-Reply with JSON only: {{"box_2d": [ymin, xmin, ymax, xmax]}} as integers normalized to 0-1000,
-or {{"box_2d": null}} if it isn't visible."""
+def birth_prompt(focus: str | None = None) -> str:
+    """The persona prompt, for the most prominent object or for one the user asked for."""
+    pick = f'find the {focus} in it (the user asked to talk to it)' if focus else "pick the single most prominent physical object in it"
+    return BIRTH_PROMPT.replace("{pick}", pick)
+
+
+def focus_prompt(object_name: str, user_text: str) -> str:
+    return f"""The user is pointing a phone camera and talking to the {object_name} in this photo.
+They just said: "{user_text}"
+
+Decide which object they want to talk to now. It's the {object_name}, unless they clearly ask to
+switch to a different object (talk to, look at, track, wake up, or point at something else).
+
+Reply with JSON only, using exactly these keys:
+- "switch": true only if they asked for a different object
+- "object": the object they want, in a few words
+- "box_2d": where that object is in the photo, as [ymin, xmin, ymax, xmax] integers normalized to
+  0-1000, or null if it isn't visible"""
 
 
 def persona_system_prompt(persona: dict) -> str:
@@ -143,8 +157,9 @@ class GeminiLLM:
 
         return types.Part.from_bytes(data=image, mime_type="image/jpeg")
 
-    async def make_persona(self, image: bytes | None) -> dict:
-        contents = [self._image_part(image), BIRTH_PROMPT] if image else [BIRTH_PROMPT]
+    async def make_persona(self, image: bytes | None, focus: str | None = None) -> dict:
+        prompt = birth_prompt(focus)
+        contents = [self._image_part(image), prompt] if image else [prompt]
         parts = [
             text
             async for text in self._stream(
@@ -155,18 +170,20 @@ class GeminiLLM:
         ]
         return _normalize_persona(json.loads("".join(parts)))
 
-    async def locate(self, image: bytes, object_name: str) -> list[int] | None:
-        """Where the object is in this frame, as a Gemini box_2d, or None if it can't be seen."""
+    async def focus(self, image: bytes, object_name: str, user_text: str) -> dict:
+        """Which object the user means now, and where it is in this frame.
+
+        Returns {"switch": bool, "object": str, "box_2d": box or None}.
+        """
         parts = [
             text
             async for text in self._stream(
-                "locate",
-                contents=[self._image_part(image), locate_prompt(object_name)],
+                "focus",
+                contents=[self._image_part(image), focus_prompt(object_name, user_text)],
                 config=self._config(response_mime_type="application/json", temperature=0.0),
             )
         ]
-        raw = json.loads("".join(parts))
-        return _normalize_box(raw.get("box_2d") if isinstance(raw, dict) else None)
+        return _normalize_focus(json.loads("".join(parts)), object_name)
 
     async def reply_stream(
         self, persona: dict, history: list[dict], user_text: str, image: bytes | None
@@ -202,11 +219,11 @@ MOCK_BOX = [300, 300, 700, 700]  # the middle of the frame
 class MockLLM:
     """Canned persona and replies, so the device and voice loop work with no Gemini key."""
 
-    async def make_persona(self, image: bytes | None) -> dict:
+    async def make_persona(self, image: bytes | None, focus: str | None = None) -> dict:
         await asyncio.sleep(0.5)
         return _normalize_persona(
             {
-                "object": "coffee mug",
+                "object": focus or "coffee mug",
                 "name": "Mugsy",
                 "personality": "A chipped veteran of a thousand early mornings, grumpy but loyal.",
                 "speaking_style": "Short, dry, world-weary one-liners.",
@@ -216,9 +233,11 @@ class MockLLM:
             }
         )
 
-    async def locate(self, image: bytes, object_name: str) -> list[int] | None:
+    async def focus(self, image: bytes, object_name: str, user_text: str) -> dict:
         await asyncio.sleep(0.3)
-        return list(MOCK_BOX)
+        # "talk to the <thing>" switches, so the switching flow can be tried without a key.
+        asked = user_text.lower().partition("talk to the ")[2].strip(" .!?")
+        return _normalize_focus({"switch": bool(asked), "object": asked or object_name, "box_2d": MOCK_BOX}, object_name)
 
     async def reply_stream(
         self, persona: dict, history: list[dict], user_text: str, image: bytes | None
@@ -241,6 +260,13 @@ def _normalize_persona(raw: dict) -> dict:
     persona = {k: str(raw.get(k) or v) if v is not None else raw.get(k) for k, v in defaults.items()}
     persona["box_2d"] = _normalize_box(raw.get("box_2d"))
     return persona
+
+
+def _normalize_focus(raw, current: str) -> dict:
+    raw = raw if isinstance(raw, dict) else {}
+    target = str(raw.get("object") or current).strip()
+    switch = bool(raw.get("switch")) and target.lower() != current.lower()
+    return {"switch": switch, "object": target if switch else current, "box_2d": _normalize_box(raw.get("box_2d"))}
 
 
 def _normalize_box(raw) -> list[int] | None:
