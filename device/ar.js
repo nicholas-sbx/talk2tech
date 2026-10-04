@@ -23,17 +23,35 @@ const CAMERA_HEIGHT = 1.4;
 const FALLBACK_DEPTH = 0.6;
 const SMILEY_MIN = 0.02; // diameter limits, in scene units (about metres)
 const SMILEY_MAX = 0.8;
-// Never smaller than this share of its distance (about a sixth of the screen's width), so it can't
-// shrink to a speck on a thin object.
-const SMILEY_MIN_VIEW = 0.1;
+// Never smaller than this share of its distance (about a quarter of the screen's width), so it
+// can't shrink to a speck on a thin object.
+const SMILEY_MIN_VIEW = 0.14;
 // Gemini picks the smiley's diameter as a share of the object's visible width; this is used until it does.
 const DEFAULT_SMILEY_SIZE = 0.5;
+// Gemini's picks read small on the phone, so the face is drawn this much bigger than it asks for.
+const SMILEY_GROW = 1.4;
 // The face is drawn on a canvas texture: FACE_UNITS of the drawing (eyes, mouth, brows at rest)
 // span one smiley diameter, and the plane is FACE_PLANE diameters across so bulging eyes, the
 // scream and sweat still fit.
 const FACE_UNITS = 110;
 const FACE_PLANE = 2.4;
 const FACE_PIXELS = 512;
+// A light rim around every line (in texture pixels, stamped in this many directions) so the face
+// still shows on dark objects.
+const OUTLINE_PX = 5;
+const OUTLINE_STEPS = 12;
+const OUTLINE_COLOR = "#ffffff";
+// Calm, the eyes look at the camera: how far they turn per unit of the camera's sideways offset
+// over its distance, as seen from the face (1 = fully to the side at 45 degrees).
+const GAZE_GAIN = 1.5;
+// The mouth opens with the reply's loudness, against the loudest it's been lately (which fades by
+// this much per frame), so any voice's volume uses the mouth's full range. Opening is quick and
+// closing a little slower, so it reads as speech rather than flicker.
+const VOICE_PEAK_FADE = 0.997;
+const VOICE_PEAK_MIN = 0.02;
+const VOICE_SILENT = 0.005;
+const MOUTH_OPEN = 0.6;
+const MOUTH_CLOSE = 0.3;
 const OFFSCREEN_MARGIN = 0.05; // how far past the screen's edge (share of the screen) counts as lost
 // The scream counts as over once the face has been calm this long, so hovering at the edge of the
 // panic zone doesn't stutter the speech it pauses.
@@ -70,7 +88,11 @@ let canvas = null;
 let gl = null;
 let running = false;
 let smiley, faceCanvas, faceTexture;
+let inkCanvas, rimCanvas; // the face's lines, and their silhouette in the outline colour
 const face = new ScribbleFace();
+let voice = null; // analyser on the reply as it plays, while the mouth follows it
+let voiceSamples = null;
+let voicePeak = VOICE_PEAK_MIN;
 let audio = null;
 let deathListener = null;
 let screamListener = null;
@@ -251,7 +273,11 @@ export function placeBox(box, frameId, fit = DEFAULT_SMILEY_SIZE) {
   const p = snap.projection.elements;
   const width = ((xmax - xmin) / 500) * (depth / p[0]);
   const height = ((ymax - ymin) / 500) * (depth / p[5]);
-  const side = THREE.MathUtils.clamp(Math.max(Math.min(width, height) * fit, depth * SMILEY_MIN_VIEW), SMILEY_MIN, SMILEY_MAX);
+  const side = THREE.MathUtils.clamp(
+    Math.max(Math.min(width, height) * fit * SMILEY_GROW, depth * SMILEY_MIN_VIEW),
+    SMILEY_MIN,
+    SMILEY_MAX,
+  );
   // The camera's up direction when the frame was taken, so the face reads upright to the viewer.
   const up = new THREE.Vector3(0, 1, 0).transformDirection(snap.cameraToWorld);
 
@@ -298,9 +324,12 @@ function setScreaming(on) {
   screamListener?.(on);
 }
 
-// Flaps the face's mouth while a reply plays.
-export function setSpeaking(on) {
+// Moves the face's mouth while a reply plays. Given the analyser the reply plays through, the mouth
+// opens as wide as it's loud; without one (e.g. the browser's own speech) it just flaps.
+export function setSpeaking(on, analyser = null) {
   face.speaking = Boolean(on);
+  voice = on ? analyser : null;
+  face.mouthLevel = voice ? 0 : null;
 }
 
 // Back from the dead (or calm again): a fresh placement starts unafraid.
@@ -605,8 +634,11 @@ function sceneModule() {
 // A unit-diameter face: a transparent square, FACE_PLANE diameters across, facing +Z at z = 0 with
 // the scribble face drawn on it, so it can be stuck flat onto a surface.
 function makeSmiley() {
-  faceCanvas = document.createElement("canvas");
-  faceCanvas.width = faceCanvas.height = FACE_PIXELS;
+  [faceCanvas, inkCanvas, rimCanvas] = [0, 0, 0].map(() => {
+    const c = document.createElement("canvas");
+    c.width = c.height = FACE_PIXELS;
+    return c;
+  });
   faceTexture = new THREE.CanvasTexture(faceCanvas);
   faceTexture.colorSpace = THREE.SRGBColorSpace;
   // Drawn last and over everything (there's no real-world occlusion anyway), so nothing in the GL
@@ -641,14 +673,61 @@ function animateMarker(time, camera) {
   }
   smiley.scale.setScalar(size);
   feelTheEdges(camera, time);
+  if (voice) listen();
+  drawFace(time);
+}
+
+// The face, with its silhouette stamped in a ring behind it as an outline.
+function drawFace(time) {
+  const ink = inkCanvas.getContext("2d");
+  ink.clearRect(0, 0, FACE_PIXELS, FACE_PIXELS);
+  face.draw(ink, FACE_PIXELS / 2, FACE_PIXELS / 2, FACE_PIXELS / (FACE_UNITS * FACE_PLANE), time);
+
+  const rim = rimCanvas.getContext("2d");
+  rim.clearRect(0, 0, FACE_PIXELS, FACE_PIXELS);
+  rim.drawImage(inkCanvas, 0, 0);
+  rim.globalCompositeOperation = "source-in";
+  rim.fillStyle = OUTLINE_COLOR;
+  rim.fillRect(0, 0, FACE_PIXELS, FACE_PIXELS);
+  rim.globalCompositeOperation = "source-over";
+
   const ctx = faceCanvas.getContext("2d");
   ctx.clearRect(0, 0, FACE_PIXELS, FACE_PIXELS);
-  face.draw(ctx, FACE_PIXELS / 2, FACE_PIXELS / 2, FACE_PIXELS / (FACE_UNITS * FACE_PLANE), time);
+  for (let i = 0; i < OUTLINE_STEPS; i++) {
+    const angle = (i / OUTLINE_STEPS) * Math.PI * 2;
+    ctx.drawImage(rimCanvas, Math.cos(angle) * OUTLINE_PX, Math.sin(angle) * OUTLINE_PX);
+  }
+  ctx.drawImage(inkCanvas, 0, 0);
   faceTexture.needsUpdate = true;
 }
 
-// Where the face is on screen: near an edge it panics, looks at that edge and screams; past it (or
-// behind the camera) it dies.
+// Sets how far the mouth is open from how loud the reply is right now.
+function listen() {
+  if (voiceSamples?.length !== voice.fftSize) voiceSamples = new Float32Array(voice.fftSize);
+  voice.getFloatTimeDomainData(voiceSamples);
+  let sum = 0;
+  for (const s of voiceSamples) sum += s * s;
+  const loudness = Math.sqrt(sum / voiceSamples.length);
+  voicePeak = Math.max(loudness, voicePeak * VOICE_PEAK_FADE, VOICE_PEAK_MIN);
+  const target = loudness < VOICE_SILENT ? 0 : Math.min(1, loudness / voicePeak);
+  const level = face.mouthLevel ?? 0;
+  face.mouthLevel = level + (target - level) * (target > level ? MOUTH_OPEN : MOUTH_CLOSE);
+}
+
+// Which way the eyes turn to look at the camera, from the face's point of view: x right, y down,
+// at most 1 in any direction.
+function gazeAtCamera(camera) {
+  smiley.updateMatrixWorld();
+  const you = smiley.worldToLocal(new THREE.Vector3().setFromMatrixPosition(camera.matrixWorld));
+  if (you.z <= 0) return { x: 0, y: 0 }; // seen from behind
+  const x = (you.x / you.z) * GAZE_GAIN;
+  const y = (-you.y / you.z) * GAZE_GAIN;
+  const length = Math.max(1, Math.hypot(x, y));
+  return { x: x / length, y: y / length };
+}
+
+// Where the face is on screen: calm, it looks at you; near an edge it panics, looks at that edge
+// and screams; past it (or behind the camera) it dies.
 function feelTheEdges(camera, time) {
   if (face.isDead) return;
   camera.updateMatrixWorld();
@@ -664,8 +743,13 @@ function feelTheEdges(camera, time) {
     return;
   }
   face.panic = EdgeFearSystem.computePanic(EdgeFearSystem.computeEdgeDistances(u, v).d);
-  const gaze = { left: { x: -1, y: 0 }, right: { x: 1, y: 0 }, top: { x: 0, y: -1 }, bottom: { x: 0, y: 1 } };
-  face.gazeDirection = gaze[EdgeFearSystem.getNearestEdge(u, v)];
+  const edges = { left: { x: -1, y: 0 }, right: { x: 1, y: 0 }, top: { x: 0, y: -1 }, bottom: { x: 0, y: 1 } };
+  const edge = edges[EdgeFearSystem.getNearestEdge(u, v)];
+  const you = gazeAtCamera(camera);
+  face.gazeDirection = {
+    x: you.x + (edge.x - you.x) * face.panic,
+    y: you.y + (edge.y - you.y) * face.panic,
+  };
   audio?.updatePanic(face.panic);
   if (face.panic > 0) {
     lastScream = time;
