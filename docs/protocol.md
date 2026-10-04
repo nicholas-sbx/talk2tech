@@ -25,10 +25,10 @@ Any new `audio` or `text` also interrupts the reply in progress.
 | `hello` | `session_id`, `llm`, `voice`, `memory` | Sent on connect. Names of the active backends (mock or real). |
 | `status` | `state`: `idle` · `transcribing` · `waking` · `thinking` · `speaking` | What the backend is doing. |
 | `transcript` | `text` | What the user said. |
-| `persona` | `persona`: `{object, name, personality, speaking_style, voice, greeting, box_2d, smiley_size}`, `box`, `frame_id` | A new object woke up: the first one, or another one the user asked to talk to. `box` is where it is in frame `frame_id` (or null). |
-| `box` | `box`, `frame_id` | The object was found again in a later turn's frame. Sent alongside the reply, at most once per turn. |
-| `model` | `model` | The model writing the reply (the backend races several and uses whichever answers first). Sent once per reply, when its first words arrive. |
-| `say` | `text`, `audio` (b64 MP3 or null) | One sentence of the reply, in order. If `audio` is null, the device speaks `text` itself. |
+| `persona` | `speaker_id`, `persona`: `{object, name, personality, speaking_style, voice, greeting, box_2d, smiley_size}`, `box`, `frame_id` | A new object woke up. Two messages are sent, with `speaker_id` 0 for Face 1 and 1 for Face 2. `box` is where it is in frame `frame_id` (or null). |
+| `box` | `speaker_id`, `box`, `frame_id` | Face 1's object (`speaker_id: 0`) was found again in a later turn's frame. Sent alongside the reply, at most once per turn. |
+| `model` | `model`, `speaker_id` | The model writing the reply. Sent once per speaker reply, when its first words arrive. |
+| `say` | `speaker_id`, `text`, `audio` (b64 MP3 or null) | One sentence of a reply, in order. Face 1 speaks first, then Face 2 responds to Face 1's words. If `audio` is null, the device speaks `text` itself. |
 | `done` | | Reply finished. |
 | `stop` | | Reply was interrupted; drop any queued audio. |
 | `reset` | | Object forgotten. |

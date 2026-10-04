@@ -57,7 +57,7 @@ let recorder = null;
 let held = false;
 let recordStart = 0;
 let frameCounter = 0;
-let smileySize; // the current object's smiley diameter, as a share of its width (Gemini's choice)
+const smileySizes = [undefined, undefined]; // each object's smiley diameter, as a share of its width
 const debugFrames = new Map();
 let audioCtx = null;
 let voice = null; // replies play through this analyser, so the AR face's mouth can follow them
@@ -67,7 +67,8 @@ let pendingSpeech = 0;
 let current = null; // the sentence playing now: { pause, resume, stop }
 let screaming = false; // the AR face is screaming: speech waits until it stops
 let calmWaiters = [];
-let thingLine = null;
+const speakerNames = ["Face 1", "Face 2"];
+const thingLines = [null, null];
 
 // ---------- startup ----------
 
@@ -186,30 +187,43 @@ function handle(msg) {
       setStatus(msg.state);
       break;
     case "transcript":
-      thingLine = null;
+      thingLines.fill(null);
       line("user", msg.text);
       break;
     case "persona":
-      $("#name").textContent = msg.persona.name;
-      $("#object").textContent = msg.persona.object;
-      // A new persona is a new object: replace the smiley rather than nudging the old one.
-      smileySize = msg.persona.smiley_size;
-      clearMarker();
-      if (msg.box) showBox(msg.box, msg.frame_id);
+      {
+        const speakerId = msg.speaker_id ?? 0;
+        if (speakerId === 0) {
+          $("#name").textContent = msg.persona.name;
+          $("#object").textContent = msg.persona.object;
+        }
+        speakerNames[speakerId] = msg.persona.name;
+        smileySizes[speakerId] = msg.persona.smiley_size;
+        if (msg.box) showBox(msg.box, msg.frame_id, speakerId);
+      }
       break;
     case "box":
-      showBox(msg.box, msg.frame_id);
+      showBox(msg.box, msg.frame_id, msg.speaker_id ?? 0);
       break;
     case "model":
       $("#model").textContent = msg.model;
       break;
     case "say":
-      if (!thingLine) thingLine = line("thing", "");
-      followCaptions(() => (thingLine.textContent = (thingLine.textContent + " " + msg.text).trim()));
+      {
+        const speakerId = msg.speaker_id ?? 0;
+        const prefix = `${speakerNames[speakerId]}: `;
+        if (!thingLines[speakerId]) thingLines[speakerId] = line("thing", prefix);
+        followCaptions(() => {
+          const previous = thingLines[speakerId].textContent.startsWith(prefix)
+            ? thingLines[speakerId].textContent.slice(prefix.length)
+            : "";
+          thingLines[speakerId].textContent = `${prefix}${(previous + " " + msg.text).trim()}`;
+        });
+      }
       enqueueSpeech(msg.text, msg.audio);
       break;
     case "done":
-      thingLine = null;
+      thingLines.fill(null);
       break;
     case "stop":
       stopSpeech();
@@ -277,8 +291,8 @@ function grabVideoFrame() {
 }
 
 // Where Gemini found the object: stick the AR smiley there, and with ?debug draw it on the sent frame.
-function showBox(box, frameId) {
-  placeBox(box, frameId, smileySize);
+function showBox(box, frameId, speakerId = 0) {
+  placeBox(box, frameId, smileySizes[speakerId], speakerId);
   const image = debugFrames.get(frameId);
   if (!DEBUG || !image) return;
   const img = new Image();

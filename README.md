@@ -73,6 +73,10 @@ turn success rate, turn errors, average time to first audio, and the active mock
 backends. Timing and backend metrics are recorded for turns completed after this instrumentation
 is deployed; older events remain visible but do not contain those fields.
 
+The conversation backend currently wakes two prominent objects. Face 1 answers the user, then Face 2
+answers Face 1 using a separate history and a distinct voice. The mobile AR client still renders one
+marker at a time; independent two-marker rendering is the next phase.
+
 ## Team habits
 
 - `main` always runs the demo. Short branches, small merges.
