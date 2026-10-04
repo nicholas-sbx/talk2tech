@@ -7,7 +7,7 @@ import time
 from collections.abc import AsyncIterator
 
 from integrations import config
-from integrations.voices import voice_menu
+from integrations.voices import VOICES, voice_menu
 
 log = logging.getLogger(__name__)
 
@@ -37,7 +37,7 @@ Reply with JSON only, using exactly these keys:
 - "voice": the best match from this list of keys:
 {voice_menu()}
 - "greeting": the first thing it says on waking up, one or two short sentences
-- "box_2d": where that object is in the photo, as [ymin, xmin, ymax, xmax] integers normalized to 0-1000
+- "box_2d": one box around the whole object in the photo, as [ymin, xmin, ymax, xmax] integers normalized to 0-1000
 - "smiley_size": a 3D smiley face sticker will be stuck flat on the object's visible surface. Pick
   its diameter as a fraction of the object's visible width, between 0.1 and 1.0, so it looks right
   for that object: big on a ball or a mug, a small sticker on a laptop lid, a car, or a fridge.
@@ -60,8 +60,37 @@ switch to a different object (talk to, look at, track, wake up, or point at some
 Reply with JSON only, using exactly these keys:
 - "switch": true only if they asked for a different object
 - "object": the object they want, in a few words
-- "box_2d": where that object is in the photo, as [ymin, xmin, ymax, xmax] integers normalized to
-  0-1000, or null if it isn't visible"""
+- "box_2d": one box around the whole object in the photo, as [ymin, xmin, ymax, xmax] integers
+  normalized to 0-1000, or null if it isn't visible"""
+
+
+# Gemini's answers are held to these shapes, so it can't nest, split or pad a box, or make up a voice.
+BOX_SCHEMA = {
+    "type": "array",
+    "items": {"type": "integer", "minimum": 0, "maximum": 1000},
+    "minItems": 4,
+    "maxItems": 4,
+}
+_PERSONA_FIELDS = {
+    "object": {"type": "string"},
+    "name": {"type": "string"},
+    "personality": {"type": "string"},
+    "speaking_style": {"type": "string"},
+    "voice": {"type": "string", "enum": list(VOICES)},
+    "greeting": {"type": "string"},
+    "box_2d": BOX_SCHEMA,
+    "smiley_size": {"type": "number", "minimum": 0.1, "maximum": 1.0},
+}
+PERSONA_SCHEMA = {"type": "object", "properties": _PERSONA_FIELDS, "required": list(_PERSONA_FIELDS)}
+FOCUS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "switch": {"type": "boolean"},
+        "object": {"type": "string"},
+        "box_2d": {"anyOf": [BOX_SCHEMA, {"type": "null"}]},
+    },
+    "required": ["switch", "object", "box_2d"],
+}
 
 
 def persona_system_prompt(persona: dict) -> str:
@@ -94,8 +123,8 @@ class GeminiLLM:
         kwargs["automatic_function_calling"] = types.AutomaticFunctionCallingConfig(disable=True)
         return types.GenerateContentConfig(**kwargs)
 
-    async def _stream(self, what: str, **kwargs) -> AsyncIterator[str]:
-        """Stream text from whichever model starts answering first.
+    async def _stream(self, what: str, **kwargs) -> tuple[str, AsyncIterator[str]]:
+        """Whichever model starts answering first: its name, and its text as it streams.
 
         Gemini latency under load is spiky per request rather than per model, so instead of waiting
         out a slow request we hedge: if nothing has arrived after GEMINI_HEDGE_S (or the request
@@ -158,13 +187,17 @@ class GeminiLLM:
         model, launched, chunks, first = winner
         now = time.perf_counter()
         log.info("[gemini] %s: %s first words %.2fs (%.2fs since start)", what, model, now - launched, now - start)
-        if first is not None:
-            if first.text:
-                yield first.text
-            async for chunk in chunks:
-                if chunk.text:
-                    yield chunk.text
-        log.info("[gemini] %s: %s finished %.2fs", what, model, time.perf_counter() - start)
+
+        async def text() -> AsyncIterator[str]:
+            if first is not None:
+                if first.text:
+                    yield first.text
+                async for chunk in chunks:
+                    if chunk.text:
+                        yield chunk.text
+            log.info("[gemini] %s: %s finished %.2fs", what, model, time.perf_counter() - start)
+
+        return model, text()
 
     @staticmethod
     def _image_part(image: bytes):
@@ -175,34 +208,33 @@ class GeminiLLM:
     async def make_persona(self, image: bytes | None, focus: str | None = None) -> dict:
         prompt = birth_prompt(focus)
         contents = [self._image_part(image), prompt] if image else [prompt]
-        parts = [
-            text
-            async for text in self._stream(
-                "persona",
-                contents=contents,
-                config=self._config(response_mime_type="application/json", temperature=1.0),
-            )
-        ]
-        return _normalize_persona(json.loads("".join(parts)))
+        _, text = await self._stream(
+            "persona",
+            contents=contents,
+            config=self._config(
+                response_mime_type="application/json", response_json_schema=PERSONA_SCHEMA, temperature=1.0
+            ),
+        )
+        return _normalize_persona(json.loads("".join([part async for part in text])))
 
     async def focus(self, image: bytes, object_name: str, user_text: str) -> dict:
         """Which object the user means now, and where it is in this frame.
 
         Returns {"switch": bool, "object": str, "box_2d": box or None}.
         """
-        parts = [
-            text
-            async for text in self._stream(
-                "focus",
-                contents=[self._image_part(image), focus_prompt(object_name, user_text)],
-                config=self._config(response_mime_type="application/json", temperature=0.0),
-            )
-        ]
-        return _normalize_focus(json.loads("".join(parts)), object_name)
+        _, text = await self._stream(
+            "focus",
+            contents=[self._image_part(image), focus_prompt(object_name, user_text)],
+            config=self._config(
+                response_mime_type="application/json", response_json_schema=FOCUS_SCHEMA, temperature=0.0
+            ),
+        )
+        return _normalize_focus(json.loads("".join([part async for part in text])), object_name)
 
     async def reply_stream(
         self, persona: dict, history: list[dict], user_text: str, image: bytes | None
-    ) -> AsyncIterator[str]:
+    ) -> tuple[str, AsyncIterator[str]]:
+        """The model answering, and its in-character reply as it streams."""
         from google.genai import types
 
         contents = [
@@ -216,7 +248,7 @@ class GeminiLLM:
         parts.append(types.Part.from_text(text=user_text))
         contents.append(types.Content(role="user", parts=parts))
 
-        async for text in self._stream(
+        return await self._stream(
             "reply",
             contents=contents,
             config=self._config(
@@ -224,8 +256,7 @@ class GeminiLLM:
                 max_output_tokens=1024,  # includes thinking tokens; the prompt keeps replies short
                 temperature=0.9,
             ),
-        ):
-            yield text
+        )
 
 
 MOCK_BOX = [300, 300, 700, 700]  # the middle of the frame
@@ -257,11 +288,15 @@ class MockLLM:
 
     async def reply_stream(
         self, persona: dict, history: list[dict], user_text: str, image: bytes | None
-    ) -> AsyncIterator[str]:
+    ) -> tuple[str, AsyncIterator[str]]:
         reply = f"You said: {user_text}. Fascinating. Now, is anyone going to fill me with coffee or not?"
-        for word in reply.split(" "):
-            await asyncio.sleep(0.03)
-            yield word + " "
+
+        async def words() -> AsyncIterator[str]:
+            for word in reply.split(" "):
+                await asyncio.sleep(0.03)
+                yield word + " "
+
+        return "mock", words()
 
 
 def _normalize_persona(raw: dict) -> dict:
@@ -294,16 +329,32 @@ def _normalize_focus(raw, current: str) -> dict:
 
 
 def _normalize_box(raw) -> list[int] | None:
-    """A valid [ymin, xmin, ymax, xmax] box in 0-1000, or None."""
-    if not isinstance(raw, list) or len(raw) != 4:
+    """A valid [ymin, xmin, ymax, xmax] box in 0-1000, or None.
+
+    The response schemas should rule it out, but without them Gemini sometimes wrapped the box in
+    another list, put a stray value next to it, or split the object into several boxes (a laptop's
+    screen and its base), so this still takes the box around every valid one it finds.
+    """
+    boxes = _find_boxes(raw)
+    if not boxes:
+        if raw is not None:
+            log.warning("unusable box_2d from Gemini: %r", raw)
         return None
-    try:
-        ymin, xmin, ymax, xmax = (max(0, min(1000, round(float(v)))) for v in raw)
-    except (TypeError, ValueError):
-        return None
-    if ymax <= ymin or xmax <= xmin:
-        return None
-    return [ymin, xmin, ymax, xmax]
+    ymins, xmins, ymaxs, xmaxs = zip(*boxes)
+    return [min(ymins), min(xmins), max(ymaxs), max(xmaxs)]
+
+
+def _find_boxes(raw) -> list[list[int]]:
+    """Every valid [ymin, xmin, ymax, xmax] list in raw, however deeply it's nested."""
+    if not isinstance(raw, list):
+        return []
+    if len(raw) == 4 and not any(isinstance(v, (list, dict)) for v in raw):
+        try:
+            ymin, xmin, ymax, xmax = (max(0, min(1000, round(float(v)))) for v in raw)
+        except (TypeError, ValueError):
+            return []
+        return [[ymin, xmin, ymax, xmax]] if ymax > ymin and xmax > xmin else []
+    return [box for item in raw for box in _find_boxes(item)]
 
 
 def make_llm():
