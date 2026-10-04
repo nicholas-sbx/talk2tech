@@ -22,6 +22,11 @@ def clean_for_speech(text: str, keep_tags: bool = False) -> str:
     return re.sub(r"\s{2,}", " ", text).strip()
 
 
+def strip_leading_tags(text: str) -> str:
+    """Drop audio tags from the start of a line, so it opens with words rather than a [sighs]."""
+    return re.sub(r"^(\s*\[[^\]]*\])+\s*", "", text)
+
+
 def pop_sentences(buffer: str) -> tuple[list[str], str]:
     """Return the complete sentences in `buffer` and the unfinished remainder."""
     sentences = []
