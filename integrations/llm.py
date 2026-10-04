@@ -23,9 +23,14 @@ Reply with JSON only, using exactly these keys:
 - "name": a short character name
 - "personality": one sentence
 - "speaking_style": one sentence about how it talks
-- "voice": the best match from this list of keys:
+- "voice_description": a prompt for an AI voice designer that will create this character's unique
+  voice. Two or three sentences, under 400 characters, describing only the voice: age, gender,
+  accent, pitch, timbre, pace, and attitude, exaggerated to fit the character. End with "Perfect
+  audio quality." Example: "A gravelly, low-pitched old man with a thick Brooklyn accent. Speaks
+  slowly and wearily, with dry sarcasm and the occasional grumble. Perfect audio quality."
+- "voice": a backup preset voice in case the designed one fails, the best match from these keys:
 {voice_menu()}
-- "greeting": the first thing it says on waking up, one or two short sentences
+- "greeting": the first thing it says on waking up, one or two short sentences{{greeting_tags}}
 - "box_2d": one box around the whole object in the photo, as [ymin, xmin, ymax, xmax] integers normalized to 0-1000
 - "smiley_size": a 3D smiley face sticker will be stuck flat on the object's visible surface. Pick
   its diameter as a fraction of the object's visible width, between 0.1 and 1.0, so it looks right
@@ -33,7 +38,7 @@ Reply with JSON only, using exactly these keys:
 """
 
 
-def birth_prompt(focus: str | None = None, user_text: str | None = None) -> str:
+def birth_prompt(focus: str | None = None, user_text: str | None = None, audio_tags: bool = False) -> str:
     """The persona prompt, for the most prominent object or for one the user asked for."""
     pick = f'find the {focus} in it (the user asked to talk to it)' if focus else "pick the single most prominent physical object in it"
     user_context = (
@@ -43,7 +48,12 @@ def birth_prompt(focus: str | None = None, user_text: str | None = None) -> str:
         if user_text
         else ""
     )
-    return BIRTH_PROMPT.replace("{pick}", pick).replace("{user_context}", user_context)
+    greeting_tags = f", optionally with an audio tag or two. {AUDIO_TAG_GUIDE}" if audio_tags else ""
+    return (
+        BIRTH_PROMPT.replace("{pick}", pick)
+        .replace("{user_context}", user_context)
+        .replace("{greeting_tags}", greeting_tags)
+    )
 
 
 def focus_prompt(object_name: str, user_text: str) -> str:
@@ -72,6 +82,7 @@ _PERSONA_FIELDS = {
     "name": {"type": "string"},
     "personality": {"type": "string"},
     "speaking_style": {"type": "string"},
+    "voice_description": {"type": "string"},
     "voice": {"type": "string", "enum": list(VOICES)},
     "greeting": {"type": "string"},
     "box_2d": BOX_SCHEMA,
@@ -89,7 +100,23 @@ FOCUS_SCHEMA = {
 }
 
 
-def persona_system_prompt(persona: dict) -> str:
+# How to write Eleven v4 audio tags. The voice acts these out instead of reading them.
+AUDIO_TAG_GUIDE = (
+    "Audio tags are short performance directions in square brackets that the voice acts out instead "
+    "of saying, like [sighs], [laughs], [whispers], [groans], [gasps], [sarcastically], [excited], "
+    "[nervously], or [muttering under breath]. Put a tag right before the words it colors, use at "
+    "most two per reply, skip them when the line doesn't need one, and never put anything else in "
+    "square brackets."
+)
+
+
+def persona_system_prompt(persona: dict, audio_tags: bool = False) -> str:
+    directions = (
+        "- Your words are spoken aloud: no markdown, emoji, lists, or asterisk stage directions.\n"
+        f"- Use audio tags to act out your personality. {AUDIO_TAG_GUIDE}"
+        if audio_tags
+        else "- Your words are spoken aloud: no markdown, emoji, lists, or stage directions."
+    )
     return f"""You are {persona['name']}, a {persona['object']} that has come to life.
 Personality: {persona['personality']}
 Speaking style: {persona['speaking_style']}
@@ -97,7 +124,7 @@ Speaking style: {persona['speaking_style']}
 The user is pointing a phone camera at you. The attached image is what the camera sees right now.
 Rules:
 - Stay in character as the object. Never mention being an AI or a model.
-- Your words are spoken aloud: no markdown, emoji, lists, or stage directions.
+{directions}
 - Keep each reply to one to two short sentences.
 - If the image shows something new, react to it in character."""
 
@@ -201,8 +228,10 @@ class GeminiLLM:
 
         return types.Part.from_bytes(data=image, mime_type="image/jpeg")
 
-    async def make_persona(self, image: bytes | None, focus: str | None = None, user_text: str | None = None) -> dict:
-        prompt = birth_prompt(focus, user_text)
+    async def make_persona(
+        self, image: bytes | None, focus: str | None = None, user_text: str | None = None, audio_tags: bool = False
+    ) -> dict:
+        prompt = birth_prompt(focus, user_text, audio_tags)
         contents = [self._image_part(image), prompt] if image else [prompt]
         _, text = await self._stream(
             "persona",
@@ -228,7 +257,7 @@ class GeminiLLM:
         return _normalize_focus(json.loads("".join([part async for part in text])), object_name)
 
     async def reply_stream(
-        self, persona: dict, history: list[dict], user_text: str, image: bytes | None
+        self, persona: dict, history: list[dict], user_text: str, image: bytes | None, audio_tags: bool = False
     ) -> tuple[str, AsyncIterator[str]]:
         """The model answering, and its in-character reply as it streams."""
         from google.genai import types
@@ -248,7 +277,7 @@ class GeminiLLM:
             "reply",
             contents=contents,
             config=self._config(
-                system_instruction=persona_system_prompt(persona),
+                system_instruction=persona_system_prompt(persona, audio_tags),
                 max_output_tokens=1024,  # includes thinking tokens; the prompt keeps replies short
                 temperature=0.9,
             ),
@@ -261,7 +290,9 @@ MOCK_BOX = [300, 300, 700, 700]  # the middle of the frame
 class MockLLM:
     """Canned persona and replies, so the device and voice loop work with no Gemini key."""
 
-    async def make_persona(self, image: bytes | None, focus: str | None = None, user_text: str | None = None) -> dict:
+    async def make_persona(
+        self, image: bytes | None, focus: str | None = None, user_text: str | None = None, audio_tags: bool = False
+    ) -> dict:
         await asyncio.sleep(0.5)
         return _normalize_persona(
             {
@@ -269,6 +300,8 @@ class MockLLM:
                 "name": "Mugsy",
                 "personality": "A chipped veteran of a thousand early mornings, grumpy but loyal.",
                 "speaking_style": "Short, dry, world-weary one-liners.",
+                "voice_description": "A gravelly, low-pitched older man. Speaks slowly and wearily, "
+                "with dry sarcasm and the occasional grumble. Perfect audio quality.",
                 "voice": "gruff_man",
                 "greeting": "Ugh. Who woke me up? I was enjoying being empty.",
                 "box_2d": MOCK_BOX,
@@ -283,7 +316,7 @@ class MockLLM:
         return _normalize_focus({"switch": bool(asked), "object": asked or object_name, "box_2d": MOCK_BOX}, object_name)
 
     async def reply_stream(
-        self, persona: dict, history: list[dict], user_text: str, image: bytes | None
+        self, persona: dict, history: list[dict], user_text: str, image: bytes | None, audio_tags: bool = False
     ) -> tuple[str, AsyncIterator[str]]:
         if "slapped" in user_text.lower():
             if "repeatedly" in user_text.lower():
@@ -309,6 +342,7 @@ def _normalize_persona(raw: dict) -> dict:
         "name": "Thing",
         "personality": "Curious and a little confused about being alive.",
         "speaking_style": "Casual and friendly.",
+        "voice_description": "",
         "voice": None,
         "greeting": "Oh! Hello there.",
     }

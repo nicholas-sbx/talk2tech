@@ -1,8 +1,8 @@
-"""Preset ElevenLabs voices the persona call picks from.
+"""Preset ElevenLabs voices: the fallback when designing a voice for an object fails or is turned off.
 
 These are ElevenLabs premade voice IDs. Check they exist in your account's Voice Library
 (some legacy premades are hidden on newer accounts) and swap in any IDs you like.
-Later upgrade: generate a unique voice per object with ElevenLabs voice design.
+Each object normally gets its own voice, designed from the persona's voice_description (see voice.py).
 """
 
 from integrations import config
