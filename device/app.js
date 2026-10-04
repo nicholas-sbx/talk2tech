@@ -1,7 +1,7 @@
 // talk2tech device client: camera + push-to-talk mic -> backend WebSocket -> spoken replies.
 // Message formats: docs/protocol.md
 
-import { arSupported, requestMotionPermission, startAR, captureFrame, placeBox, clearMarker, inAR } from "./ar.js";
+import { arSupported, requestMotionPermission, startAR, captureFrame, placeBox, clearMarker, inAR, setSpeaking } from "./ar.js";
 
 const $ = (sel) => document.querySelector(sel);
 const video = $("#cam");
@@ -98,7 +98,7 @@ async function startWithAR(motion) {
   }
   let arError = null;
   try {
-    await startAR();
+    await startAR(audioCtx);
     document.documentElement.classList.add("ar");
   } catch (err) {
     // Camera or motion access refused, unsupported browser, etc.: carry on with the plain camera view.
@@ -504,11 +504,15 @@ function enqueueSpeech(text, audioB64) {
     if (gen !== playGen) return;
     const buffer = await decoded;
     if (gen !== playGen) return;
+    setSpeaking(true);
     await (buffer ? playBuffer(buffer) : speakLocally(text));
   }).finally(() => {
     if (gen !== playGen) return;
     // Reply finished: reopen the mic so the next press is instant.
-    if (--pendingSpeech === 0) scheduleMicReopen();
+    if (--pendingSpeech === 0) {
+      setSpeaking(false);
+      scheduleMicReopen();
+    }
   });
 }
 
@@ -541,6 +545,7 @@ function stopSpeech() {
   playGen++;
   pendingSpeech = 0;
   playChain = Promise.resolve();
+  setSpeaking(false);
   scheduleMicReopen();
   if (currentSource) {
     try { currentSource.stop(); } catch {}
