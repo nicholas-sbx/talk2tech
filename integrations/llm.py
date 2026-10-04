@@ -39,7 +39,8 @@ def birth_prompt(focus: str | None = None, user_text: str | None = None, audio_t
     user_context = (
         f'\nThe user has already said: "{user_text}"\n'
         "Use this as context when choosing the object's personality, speaking style, and greeting. "
-        "Treat it as the user's message, that you need to address. Make sure you respond to the user's inquiry.\n"
+        "The greeting is the object's reply to this message: it must directly answer the user's question "
+        "or respond to what they said, in character, rather than just introducing itself.\n"
         if user_text
         else ""
     )
@@ -120,10 +121,14 @@ Speaking style: {persona['speaking_style']}
 
 The user is pointing a phone camera at you. The attached image is what the camera sees right now.
 Rules:
+- Most important: respond to what the user just said. Answer their question or reply to their
+  point directly, in your first sentence. If they ask for information or help, give a real, useful
+  answer. Your personality and emotions color the answer; they never replace it, and you never dodge,
+  change the subject, or just complain instead.
 - Stay in character as the object. Never mention being an AI or a model.
 {directions}
 - Keep each reply to one to two short sentences.
-- If the image shows something new, react to it in character."""
+- Only mention something new in the image if it's relevant or the user asks about it."""
 
 
 class GeminiLLM:
