@@ -1,7 +1,7 @@
 // AR on phones via the 8th Wall engine (world tracking in plain iOS Safari and Android Chrome),
 // rendered with three.js. 8th Wall owns the camera: it draws the feed, tracks the phone's pose,
 // and gives us the frames we send to Gemini. When Gemini says where the object is in one of those
-// frames, a pulsating green slab is laid flat on its surface in the tracked 3D world.
+// frames, a 3D smiley face is stuck flat onto its surface in the tracked 3D world.
 //
 // 8th Wall engine © Niantic Spatial, Inc., used under the XR Engine License Agreement:
 // https://github.com/8thwall/engine/blob/main/LICENSE
@@ -17,24 +17,25 @@ const BOX_CORE = 0.6; // only trust hits in the middle of the box, not its edges
 // Scene units are about metres: tracking assumes the phone starts this high above the floor.
 const CAMERA_HEIGHT = 1.4;
 const FALLBACK_DEPTH = 0.6;
-const CUBE_MIN = 0.03;
-const CUBE_MAX = 0.6;
-const SLAB = 0.25; // thickness, as a fraction of the side: a flattish cube lying on the surface
-const PULSE_HZ = 1.5;
+const SMILEY_MIN = 0.02; // diameter limits, in scene units (about metres)
+const SMILEY_MAX = 0.8;
+// Gemini picks the smiley's diameter as a share of the object's visible width; this is used until it does.
+const DEFAULT_SMILEY_SIZE = 0.5;
+const GLOW_HZ = 1.2;
 const FOLLOW = 0.15; // per-frame easing toward a new placement, so re-locating doesn't jump
 const MIN_PLANE_HITS = 4; // fewer hits than this can't give a trustworthy surface angle
 const MAX_PLANE_ROUGHNESS = 0.2; // reject fits whose points stray from the plane by more than this share of their spread
-// The slab never tilts further than this from facing the camera, so a noisy fit can't turn it
+// The smiley never tilts further than this from facing the camera, so a noisy fit can't turn it
 // edge-on (and invisible).
 const MAX_TILT = (60 * Math.PI) / 180;
-// A new box this close to the current placement (in slab sides) refines it instead of replacing it.
+// A new box this close to the current placement (in smiley diameters) refines it instead of replacing it.
 const SAME_SPOT = 2;
 const RELOCATE_BLEND = 0.5;
-// Between boxes, the surface under the slab is re-checked so it stays on it as tracking refines.
+// Between boxes, the surface under the smiley is re-checked so it stays on it as tracking refines.
 const REFINE_EVERY = 6; // frames
-const REFINE_GRID = 4; // hit tests per side, spread over the slab's footprint on screen
+const REFINE_GRID = 4; // hit tests per side, spread over the smiley's footprint on screen
 const DEPTH_GAIN = 0.3;
-// Re-checks only trust hits within this share of the slab's distance, and can never move it further
+// Re-checks only trust hits within this share of the smiley's distance, and can never move it further
 // than this share of its placed depth from where Gemini's box put it, so stray points can't walk it
 // off (or into the camera).
 const REFINE_WINDOW = 0.3;
@@ -52,7 +53,7 @@ let XR8 = null;
 let canvas = null;
 let gl = null;
 let running = false;
-let cube, cubeFill;
+let smiley, smileyFace;
 
 // Camera pose, projection and 3D points for each frame we sent, so a box that arrives seconds
 // later still maps onto the world the way it was when the photo was taken.
@@ -65,8 +66,8 @@ let reality = null; // this frame's tracking output
 const stats = { sent: 0, unreadable: 0, boxes: 0, lastBox: "none yet", refines: 0, lastRefine: "" };
 let statsShown = 0;
 
-// Where the slab rests: a point on the surface, the surface normal (towards the camera), a
-// direction in the surface for the slab's edges to follow, and its side length.
+// Where the smiley sits: a point on the surface, the surface normal (towards the camera), the
+// direction its top should face, and its diameter.
 let placement = null;
 let targetPosition = null;
 let targetQuaternion = null;
@@ -129,7 +130,7 @@ export async function startAR() {
       fullWindowModule(),
       XR8.XrController.pipelineModule(),
       XR8.GlTextureRenderer.pipelineModule(), // draws the camera feed
-      captureModule(), // runs after the feed is drawn but before the cube is, so frames are clean
+      captureModule(), // runs after the feed is drawn but before the smiley is, so frames are clean
       XR8.Threejs.pipelineModule(),
       sceneModule(),
       {
@@ -169,7 +170,8 @@ export function captureFrame() {
 }
 
 // box: Gemini box_2d [ymin, xmin, ymax, xmax] (0-1000) for the frame captureFrame() named frameId.
-export function placeBox(box, frameId) {
+// fit: the smiley's diameter as a share of the object's visible width, as Gemini chose it.
+export function placeBox(box, frameId, fit = DEFAULT_SMILEY_SIZE) {
   const snap = snapshots.get(frameId);
   stats.boxes++;
   if (!running || !box) return;
@@ -218,14 +220,15 @@ export function placeBox(box, frameId) {
   const point = origin.clone().addScaledVector(dir, depth / -dirCamera.z);
   limitTilt(normal, origin.clone().sub(point));
 
-  // Real-world size of the box at that depth; the slab matches its smaller side.
+  // Real-world size of the box at that depth; the smiley is Gemini's chosen share of its smaller side.
   const p = snap.projection.elements;
   const width = ((xmax - xmin) / 500) * (depth / p[0]);
   const height = ((ymax - ymin) / 500) * (depth / p[5]);
-  const side = THREE.MathUtils.clamp(Math.min(width, height), CUBE_MIN, CUBE_MAX);
-  const right = new THREE.Vector3(1, 0, 0).transformDirection(snap.cameraToWorld);
+  const side = THREE.MathUtils.clamp(Math.min(width, height) * fit, SMILEY_MIN, SMILEY_MAX);
+  // The camera's up direction when the frame was taken, so the face reads upright to the viewer.
+  const up = new THREE.Vector3(0, 1, 0).transformDirection(snap.cameraToWorld);
 
-  // Same object again (a later turn): nudge the slab rather than jumping to a noisier estimate.
+  // Same object again (a later turn): nudge the smiley rather than jumping to a noisier estimate.
   if (placement && placement.point.distanceTo(point) < SAME_SPOT * Math.max(side, placement.size)) {
     placement.point.lerp(point, RELOCATE_BLEND);
     placement.home.lerp(point, RELOCATE_BLEND);
@@ -235,34 +238,34 @@ export function placeBox(box, frameId) {
     source += ", blended";
   } else {
     // home and leash: where the box put it, and how far re-checks may move it from there.
-    placement = { point, normal, right, size: side, home: point.clone(), leash: depth * REFINE_LEASH };
+    placement = { point, normal, up, size: side, home: point.clone(), leash: depth * REFINE_LEASH };
   }
-  aimSlab();
+  aimMarker();
 
   const fmt = (v) => v.toArray().map((n) => n.toFixed(2)).join(", ");
-  stats.lastBox = `${frameId}: depth ${depth.toFixed(2)} (${source}), side ${side.toFixed(2)}, normal ${fmt(placement.normal)}`;
+  stats.lastBox = `${frameId}: depth ${depth.toFixed(2)} (${source}), diameter ${side.toFixed(2)} (${Math.round(fit * 100)}% of object), normal ${fmt(placement.normal)}`;
 }
 
-export function clearCube() {
+export function clearMarker() {
   placement = null;
   targetPosition = null;
-  if (cube) cube.visible = false;
+  if (smiley) smiley.visible = false;
 }
 
-// Turns the placement into the slab's pose: lying on the surface, its face along the normal and
-// its edges lined up with `right` (the camera's sideways direction when it was placed).
-function aimSlab() {
-  const { point, normal, right } = placement;
-  let x = right.clone().addScaledVector(normal, -right.dot(normal));
-  if (x.lengthSq() < 1e-6) x = new THREE.Vector3(0, 0, 1).cross(normal);
-  x.normalize();
-  const z = x.clone().cross(normal);
-  targetQuaternion = new THREE.Quaternion().setFromRotationMatrix(new THREE.Matrix4().makeBasis(x, normal, z));
-  targetPosition = point.clone().addScaledVector(normal, (placement.size * SLAB) / 2);
+// Turns the placement into the smiley's pose: its back flat on the surface, its face along the
+// normal, and its top towards `up` (the camera's up when it was placed) as far as the surface allows.
+function aimMarker() {
+  const { point, normal, up } = placement;
+  let top = up.clone().addScaledVector(normal, -up.dot(normal));
+  if (top.lengthSq() < 1e-6) top = new THREE.Vector3(0, 0, -1).addScaledVector(normal, normal.z);
+  top.normalize();
+  const side = top.clone().cross(normal);
+  targetQuaternion = new THREE.Quaternion().setFromRotationMatrix(new THREE.Matrix4().makeBasis(side, top, normal));
+  targetPosition = point.clone();
 }
 
-// Re-checks the surface under the slab with a few hit tests around where it appears on screen,
-// and eases the slab's depth and angle onto it. Only depth along the line of sight is corrected:
+// Re-checks the surface under the smiley with a few hit tests around where it appears on screen,
+// and eases the smiley's depth and angle onto it. Only depth along the line of sight is corrected:
 // sideways position comes from Gemini's boxes.
 function refineOnSurface(camera) {
   if (!placement || reality?.trackingStatus !== "NORMAL") return;
@@ -275,7 +278,7 @@ function refineOnSurface(camera) {
   const distance = toPoint.length();
   const sight = toPoint.normalize();
 
-  // The slab's half-width on screen, in hit-test units (0-1 across the canvas).
+  // The smiley's half-width on screen, in hit-test units (0-1 across the canvas).
   const side = new THREE.Vector3(1, 0, 0).transformDirection(camera.matrixWorld);
   const edge = placement.point.clone().addScaledVector(side, placement.size / 2).project(camera);
   const rx = THREE.MathUtils.clamp(Math.abs(edge.x - centre.x) / 2, 0.01, 0.2);
@@ -283,7 +286,7 @@ function refineOnSurface(camera) {
   const sx = (centre.x + 1) / 2;
   const sy = (1 - centre.y) / 2;
 
-  // Keep hits near the line of sight to the slab and near its current depth.
+  // Keep hits near the line of sight to the smiley and near its current depth.
   const reach = placement.size + 0.02;
   const hits = [];
   for (let gy = 0; gy < REFINE_GRID; gy++) {
@@ -313,7 +316,7 @@ function refineOnSurface(camera) {
   }
   stats.refines++;
   stats.lastRefine = `${hits.length} hits${plane ? ", plane" : ""}`;
-  aimSlab();
+  aimMarker();
 }
 
 // Points `normal` (in place) toward `toward`'s side, tilted at most MAX_TILT away from it.
@@ -448,18 +451,18 @@ function showStats() {
   const el = document.getElementById("ar-debug");
   if (!el) return;
   const tracking = reality ? `${reality.trackingStatus} ${reality.trackingReason}` : "no tracking yet";
-  const cubeState = placement ? `shown, ${stats.refines} surface re-checks (last: ${stats.lastRefine || "none"})` : "not placed";
+  const markerState = placement ? `shown, ${stats.refines} surface re-checks (last: ${stats.lastRefine || "none"})` : "not placed";
   el.textContent = [
     `tracking: ${tracking}`,
     `frames sent: ${stats.sent}, unreadable: ${stats.unreadable}, boxes: ${stats.boxes}`,
     `last box: ${stats.lastBox}`,
-    `cube: ${cubeState}`,
+    `smiley: ${markerState}`,
   ].join("\n");
   el.hidden = false;
 }
 
 // Called in onRender, after the three.js module has moved its camera to this frame's pose, so
-// placement uses exactly the camera the cube is drawn with.
+// placement uses exactly the camera the smiley is drawn with.
 function snapshot() {
   const { camera } = XR8.Threejs.xrScene();
   camera.updateMatrixWorld();
@@ -516,56 +519,74 @@ function sceneModule() {
     onStart: () => {
       const { scene, camera } = XR8.Threejs.xrScene();
       scene.add(new THREE.HemisphereLight(0xffffff, 0x445544, 1.5));
-      scene.add(makeCube());
+      scene.add(makeSmiley());
       camera.position.set(0, CAMERA_HEIGHT, 0);
       XR8.XrController.updateCameraProjectionMatrix({ origin: camera.position, facing: camera.quaternion });
     },
     onUpdate: () => {
       if (++updates % REFINE_EVERY === 0) refineOnSurface(XR8.Threejs.xrScene().camera);
-      animateCube(performance.now());
+      animateMarker(performance.now());
     },
   };
 }
 
-// ---------- the cube ----------
+// ---------- the smiley ----------
 
-function makeCube() {
-  // Unit side, flattened: its local Y is the surface normal.
-  const geometry = new THREE.BoxGeometry(1, SLAB, 1);
-  cubeFill = new THREE.MeshStandardMaterial({
-    color: 0x22ff66,
-    emissive: 0x22ff66,
-    emissiveIntensity: 0.6,
-    transparent: true,
-    opacity: 0.35,
-    depthWrite: false,
-    side: THREE.DoubleSide, // still visible if the camera ends up inside it
+// A unit-diameter smiley face: a thin yellow disc whose back sits at z = 0 and whose face points
+// along +Z, with raised eyes and smile, so it can be stuck flat onto a surface.
+function makeSmiley() {
+  const DEPTH = 0.08;
+  smileyFace = new THREE.MeshStandardMaterial({
+    color: 0xffd23f,
+    emissive: 0xffb000,
+    emissiveIntensity: 0.15,
+    roughness: 0.45,
+    side: THREE.DoubleSide,
   });
-  const edges = new THREE.LineSegments(
-    new THREE.EdgesGeometry(geometry),
-    new THREE.LineBasicMaterial({ color: 0x7dffa8 }),
+  const ink = new THREE.MeshStandardMaterial({ color: 0x2b1d0e, roughness: 0.6 });
+  const rimMaterial = new THREE.MeshStandardMaterial({ color: 0xe8a800, roughness: 0.5 });
+
+  const disc = new THREE.CylinderGeometry(0.5, 0.5, DEPTH, 48);
+  disc.rotateX(Math.PI / 2);
+  disc.translate(0, 0, DEPTH / 2);
+  const rim = new THREE.TorusGeometry(0.5, 0.025, 8, 48);
+  rim.translate(0, 0, DEPTH);
+
+  const eye = new THREE.SphereGeometry(0.07, 16, 12);
+  eye.scale(1, 1.5, 0.5);
+  const leftEye = eye.clone().translate(-0.17, 0.14, DEPTH);
+  const rightEye = eye.clone().translate(0.17, 0.14, DEPTH);
+
+  // The lower half of a ring.
+  const smile = new THREE.TorusGeometry(0.28, 0.04, 10, 32, Math.PI);
+  smile.rotateZ(Math.PI);
+  smile.translate(0, 0.02, DEPTH);
+
+  smiley = new THREE.Group();
+  smiley.add(
+    new THREE.Mesh(disc, smileyFace),
+    new THREE.Mesh(rim, rimMaterial),
+    new THREE.Mesh(leftEye, ink),
+    new THREE.Mesh(rightEye, ink),
+    new THREE.Mesh(smile, ink),
   );
-  cube = new THREE.Group();
-  cube.add(new THREE.Mesh(geometry, cubeFill), edges);
-  cube.visible = false;
-  return cube;
+  smiley.visible = false;
+  return smiley;
 }
 
-function animateCube(time) {
+function animateMarker(time) {
   if (!targetPosition) return;
-  if (!cube.visible) {
-    cube.position.copy(targetPosition);
-    cube.quaternion.copy(targetQuaternion);
+  if (!smiley.visible) {
+    smiley.position.copy(targetPosition);
+    smiley.quaternion.copy(targetQuaternion);
     size = placement.size;
-    cube.visible = true;
+    smiley.visible = true;
   } else {
-    cube.position.lerp(targetPosition, FOLLOW);
-    cube.quaternion.slerp(targetQuaternion, FOLLOW);
+    smiley.position.lerp(targetPosition, FOLLOW);
+    smiley.quaternion.slerp(targetQuaternion, FOLLOW);
     size += (placement.size - size) * FOLLOW;
   }
-  const seconds = time / 1000;
-  const pulse = Math.sin(seconds * 2 * Math.PI * PULSE_HZ);
-  cube.scale.setScalar(size * (1 + 0.08 * pulse));
-  cubeFill.emissiveIntensity = 0.6 + 0.4 * pulse;
-  cubeFill.opacity = 0.35 + 0.15 * pulse;
+  smiley.scale.setScalar(size);
+  // Stuck on, so it doesn't move or scale: it just glows gently.
+  smileyFace.emissiveIntensity = 0.15 + 0.1 * Math.sin((time / 1000) * 2 * Math.PI * GLOW_HZ);
 }
