@@ -175,13 +175,12 @@ export function captureFrame() {
 // box: Gemini box_2d [ymin, xmin, ymax, xmax] (0-1000) for the frame captureFrame() named frameId.
 // fit: the smiley's diameter as a share of the object's visible width, as Gemini chose it.
 export function placeBox(box, frameId, fit = DEFAULT_SMILEY_SIZE) {
-  const snap = snapshots.get(frameId);
   stats.boxes++;
   if (!running || !box) return;
-  if (!snap) {
-    stats.lastBox = `${frameId}: no saved pose for that frame`;
-    return;
-  }
+  // No saved pose (the frame wasn't captured in AR): use the camera as it is now. Close enough
+  // unless the phone moved a lot since.
+  const snap = snapshots.get(frameId) ?? snapshot();
+  if (!snapshots.has(frameId)) frameId = `${frameId} (no saved pose, used current camera)`;
   const [ymin, xmin, ymax, xmax] = box;
 
   // Hits that land in the middle of the box, as seen from the camera when the frame was taken.
@@ -425,7 +424,11 @@ function readCanvas() {
   gl.bindFramebuffer(gl.FRAMEBUFFER, null);
   gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
   gl.bindFramebuffer(gl.FRAMEBUFFER, bound);
-  if (pixels[3] === 0) return null; // nothing drawn yet
+  // Nothing drawn yet if it's all black. (Not alpha: iOS can read the feed back with zero alpha.)
+  let lit = false;
+  for (let i = 0; i < pixels.length && !lit; i += 4 * 101) lit = pixels[i] + pixels[i + 1] + pixels[i + 2] > 0;
+  if (!lit) return null;
+  for (let i = 3; i < pixels.length; i += 4) pixels[i] = 255; // or the JPEG comes out black
 
   // readPixels is bottom-up; images are top-down.
   const full = document.createElement("canvas");
@@ -573,14 +576,24 @@ function makeSmiley() {
   smile.rotateZ(Math.PI);
   smile.translate(0, 0.02, DEPTH);
 
+  // Drawn last and over everything (there's no real-world occlusion anyway), back to front, so
+  // nothing in the GL state left by the camera feed can hide it.
+  const parts = [
+    [disc, smileyFace, 10],
+    [rim, rimMaterial, 11],
+    [leftEye, ink, 12],
+    [rightEye, ink, 12],
+    [smile, ink, 12],
+  ];
   smiley = new THREE.Group();
-  smiley.add(
-    new THREE.Mesh(disc, smileyFace),
-    new THREE.Mesh(rim, rimMaterial),
-    new THREE.Mesh(leftEye, ink),
-    new THREE.Mesh(rightEye, ink),
-    new THREE.Mesh(smile, ink),
-  );
+  for (const [geometry, material, order] of parts) {
+    material.depthTest = false;
+    material.depthWrite = false;
+    const mesh = new THREE.Mesh(geometry, material);
+    mesh.renderOrder = order;
+    mesh.frustumCulled = false;
+    smiley.add(mesh);
+  }
   smiley.visible = false;
   return smiley;
 }
