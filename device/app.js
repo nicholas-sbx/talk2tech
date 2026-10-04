@@ -11,6 +11,7 @@ const textInput = $("#text-input");
 
 const STATUS_TEXT = {
   idle: "Hold to talk",
+  opening: "One sec…",
   listening: "Listening…",
   transcribing: "Hearing you…",
   waking: "Hold on, it's waking up…",
@@ -23,8 +24,10 @@ const MIN_CLIP_MS = 300;
 
 let ws;
 let camStream = null;
-let micStream = null;
+let micAllowed = false; // permission granted at start; the mic itself only opens while the button is held
 let recorder = null;
+let held = false;
+let pressId = 0;
 let recordStart = 0;
 let pressFrame = null;
 let audioCtx = null;
@@ -45,7 +48,10 @@ $("#start-btn").addEventListener("click", async () => {
       audio: { echoCancellation: true, noiseSuppression: true },
     });
     camStream = new MediaStream(stream.getVideoTracks());
-    micStream = new MediaStream(stream.getAudioTracks());
+    // Only wanted the permission: a live mic keeps iOS in "phone call" audio mode, which ducks playback.
+    micAllowed = stream.getAudioTracks().length > 0;
+    stream.getAudioTracks().forEach((t) => t.stop());
+    setAudioSession("playback");
     video.srcObject = camStream;
   } catch (err) {
     console.warn(err);
@@ -117,8 +123,8 @@ function handle(msg) {
 }
 
 function setStatus(state) {
-  talkBtn.disabled = !micStream;
-  statusEl.textContent = micStream || state !== "idle" ? STATUS_TEXT[state] || state : "Type below to talk";
+  talkBtn.disabled = !micAllowed;
+  statusEl.textContent = micAllowed || state !== "idle" ? STATUS_TEXT[state] || state : "Type below to talk";
 }
 
 function line(kind, text) {
@@ -149,21 +155,62 @@ function pickMime() {
   return options.find((m) => window.MediaRecorder && MediaRecorder.isTypeSupported(m)) || "";
 }
 
-function startRecording(ev) {
+// Safari 17+: say explicitly whether we're recording, so playback isn't treated like a call.
+function setAudioSession(type) {
+  try { if (navigator.audioSession) navigator.audioSession.type = type; } catch {}
+}
+
+function openMic() {
+  setAudioSession("play-and-record");
+  return navigator.mediaDevices.getUserMedia({
+    audio: { echoCancellation: true, noiseSuppression: true },
+  });
+}
+
+function closeMic(stream) {
+  stream.getTracks().forEach((t) => t.stop());
+  setAudioSession("playback");
+}
+
+async function startRecording(ev) {
   ev.preventDefault();
-  if (!micStream || recorder) return;
+  if (!micAllowed || held || recorder) return;
+  held = true;
+  const id = ++pressId;
   talkBtn.setPointerCapture?.(ev.pointerId);
   stopSpeech();
+  audioCtx?.resume();
   send({ type: "interrupt" });
   pressFrame = grabFrame(); // the frame from the moment you start talking
   // Lets a new object start waking up while you're still talking.
   if (pressFrame) send({ type: "frame", image: pressFrame });
+  talkBtn.classList.add("recording");
+  setStatus("opening");
+
+  let stream;
+  try {
+    stream = await openMic();
+  } catch (err) {
+    console.warn(err);
+    talkBtn.classList.remove("recording");
+    held = false;
+    setAudioSession("playback");
+    line("error", `Mic unavailable: ${err.message}`);
+    return setStatus("idle");
+  }
+  // Let go (or pressed again) before the mic came up: nothing to record.
+  if (id !== pressId || !held) {
+    closeMic(stream);
+    if (id === pressId) setStatus("idle");
+    return;
+  }
 
   const mime = pickMime();
   const chunks = [];
-  recorder = new MediaRecorder(micStream, mime ? { mimeType: mime } : undefined);
+  recorder = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
   recorder.ondataavailable = (e) => e.data.size && chunks.push(e.data);
   recorder.onstop = async () => {
+    closeMic(stream);
     const tooShort = performance.now() - recordStart < MIN_CLIP_MS;
     recorder = null;
     if (tooShort || !chunks.length) return setStatus("idle");
@@ -172,11 +219,11 @@ function startRecording(ev) {
   };
   recorder.start();
   recordStart = performance.now();
-  talkBtn.classList.add("recording");
   setStatus("listening");
 }
 
 function stopRecording() {
+  held = false;
   talkBtn.classList.remove("recording");
   if (recorder && recorder.state === "recording") recorder.stop();
 }
@@ -247,6 +294,7 @@ function enqueueSpeech(text, audioB64) {
 }
 
 function playBuffer(buffer) {
+  if (audioCtx.state !== "running") audioCtx.resume();
   return new Promise((resolve) => {
     const src = audioCtx.createBufferSource();
     src.buffer = buffer;
