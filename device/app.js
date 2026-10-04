@@ -192,9 +192,18 @@ function setAudioSession(type) {
   try { if (navigator.audioSession) navigator.audioSession.type = type; } catch {}
 }
 
-function openMic() {
-  setAudioSession("play-and-record");
-  return navigator.mediaDevices.getUserMedia({ audio: AUDIO });
+async function openMic() {
+  // "auto" becomes play-and-record on its own once capture starts.
+  setAudioSession("auto");
+  try {
+    return await navigator.mediaDevices.getUserMedia({ audio: AUDIO });
+  } catch (err) {
+    // Safari can reject capture while the "playback" session is still being swapped out; retry once.
+    if (!navigator.audioSession) throw err;
+    console.warn(err);
+    await new Promise((r) => setTimeout(r, 250));
+    return navigator.mediaDevices.getUserMedia({ audio: AUDIO });
+  }
 }
 
 function closeMic(stream) {
