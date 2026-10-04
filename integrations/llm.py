@@ -46,7 +46,7 @@ class GeminiLLM:
         from google import genai
 
         self._client = genai.Client(api_key=config.GEMINI_API_KEY)
-        self._models = [m for m in (config.GEMINI_MODEL, config.GEMINI_FALLBACK_MODEL) if m]
+        self._models = list(dict.fromkeys(m for m in (config.GEMINI_MODEL, *config.GEMINI_FALLBACK_MODELS) if m))
         self._skip_until: dict[str, float] = {}  # model -> monotonic time it's worth trying again
 
     def _config(self, **kwargs):

@@ -18,7 +18,12 @@ FORCE_MOCK = _env("FORCE_MOCK") == "1"
 
 GEMINI_API_KEY = _env("GEMINI_API_KEY")
 GEMINI_MODEL = _env("GEMINI_MODEL", "gemini-3.5-flash-lite")
-GEMINI_FALLBACK_MODEL = _env("GEMINI_FALLBACK_MODEL", "gemini-3.5-flash")
+# Tried in order when the model before times out or is overloaded. Comma-separated.
+GEMINI_FALLBACK_MODELS = [
+    m.strip()
+    for m in _env("GEMINI_FALLBACK_MODELS", _env("GEMINI_FALLBACK_MODEL", "gemini-3.5-flash,gemini-3.1-flash-lite")).split(",")
+    if m.strip()
+]
 # Less thinking = faster replies. gemini-3.5-flash-lite supports minimal/low/medium/high.
 GEMINI_THINKING_LEVEL = _env("GEMINI_THINKING_LEVEL", "minimal")
 # Give up on a model that hasn't started answering within this many seconds, and skip it for a while.
