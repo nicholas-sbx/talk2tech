@@ -10,7 +10,7 @@ Binary payloads (images, audio) are base64 strings. Agree on changes here before
 | `frame` | `image` (b64 JPEG), `frame_id` | Sent when the talk button is pressed. If no object is awake yet, the backend starts creating its persona right away, while the user is still talking. |
 | `audio` | `mime`, `data` (b64 audio clip), `image` (b64 JPEG or null), `frame_id` | Push-to-talk clip just ended. `image` is the camera frame from when the button was pressed. |
 | `text` | `text`, `image`, `frame_id` | Typed message, same as `audio` but skips speech-to-text. |
-| `slap` | `anger_level`, `image`, `frame_id` | Physical force / slap detected on the object. Prompts an in-character reaction and re-locates the AR marker. |
+| `slap` | `anger_level`, `resume` (optional bool), `image`, `frame_id` | Physical force / slap detected on the object. If `resume` is true, re-locates the marker while letting active dialogue resume; otherwise interrupts and prompts an in-character complaint. |
 | `interrupt` | | User started talking; stop the current reply. |
 | `reset` | | Forget the current object; the next turn "wakes up" a new one. |
 

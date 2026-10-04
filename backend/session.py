@@ -76,8 +76,13 @@ class Session:
                     self._start_turn(self._respond(msg.get("text", "").strip(), image, frame_id))
                 elif kind == "slap":
                     anger_level = int(msg.get("anger_level", 1))
+                    resume = bool(msg.get("resume", False))
                     image, frame_id = _decode(msg.get("image")), msg.get("frame_id")
-                    self._start_turn(self._slap_turn(anger_level, image, frame_id))
+                    if resume:
+                        if self.persona is not None and image:
+                            self._start_locating(image, frame_id, user_text="slap")
+                    else:
+                        self._start_turn(self._slap_turn(anger_level, image, frame_id))
                 elif kind == "interrupt":
                     self._cancel_turn()
                 elif kind == "reset":

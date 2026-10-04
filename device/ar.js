@@ -312,6 +312,11 @@ export function triggerSlap(angerLevel = 1) {
   face.triggerSlap(angerLevel);
 }
 
+// Plays cartoon vocal "Ow!" exclamation.
+export function playOwSound() {
+  audio?.playOwSound();
+}
+
 function setScreaming(on) {
   if (on === screaming) return;
   screaming = on;

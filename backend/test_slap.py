@@ -113,6 +113,43 @@ class TestSlapInteraction(unittest.TestCase):
         self.assertIn("Stop hitting me", say_texts)
         self.assertIn("monster", say_texts)
 
+    def test_session_slap_with_resume_flag_does_not_cancel_turn(self):
+        """Verify slap with resume=True preserves the active dialogue turn."""
+        sent_messages = []
+
+        fake_ws = AsyncMock()
+        fake_ws.send_json = AsyncMock(side_effect=lambda msg: sent_messages.append(msg))
+
+        messages = [
+            {"type": "text", "text": "Tell me a story", "image": None, "frame_id": "f1"},
+            {"type": "slap", "anger_level": 1, "resume": True, "image": None, "frame_id": "f2"},
+        ]
+
+        async def fake_receive_json():
+            if messages:
+                msg = messages.pop(0)
+                if msg["type"] == "slap":
+                    # Give the previous turn a moment to begin executing
+                    await asyncio.sleep(0.05)
+                return msg
+            while session._turn and not session._turn.done():
+                await asyncio.sleep(0.02)
+            from fastapi import WebSocketDisconnect
+            raise WebSocketDisconnect()
+
+        fake_ws.receive_json = AsyncMock(side_effect=fake_receive_json)
+
+        llm = MockLLM()
+        voice = MockVoice()
+        memory = make_memory()
+
+        session = Session(fake_ws, llm, voice, memory)
+        asyncio.run(session.run())
+
+        say_texts = " ".join(m["text"] for m in sent_messages if m["type"] == "say")
+        # Ensure the original dialogue was not killed by the slap
+        self.assertIn("Tell me a story", say_texts)
+
 
 if __name__ == "__main__":
     unittest.main()
